@@ -96,6 +96,7 @@ namespace :dump do
     task :upload, :roles => :db, :only => {:primary => true} do
       files = run_local(dump_command(:versions)).split("\n")
       if file = files.last
+        file.strip!
         transfer_with_progress :up, "dump/#{file}", "#{current_path}/dump/#{file}", :via => :scp
       end
     end
@@ -126,6 +127,7 @@ namespace :dump do
       files = run_remote("cd #{current_path}; #{dump_command(:versions, :rake => rake, :RAILS_ENV => fetch_rails_env)}").split("\n")
       if file = files.last
         FileUtils.mkpath('dump')
+        file.strip!
         transfer_with_progress :down, "#{current_path}/dump/#{file}", "dump/#{file}", :via => :scp
       end
     end
