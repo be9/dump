@@ -1,3 +1,5 @@
+require 'tempfile'
+
 class DumpRake
   class DumpWriter < Dump
     attr_reader :stream, :config
