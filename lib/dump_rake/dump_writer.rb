@@ -16,16 +16,19 @@ class DumpRake
     def open
       Pathname.new(path).dirname.mkpath
       Zlib::GzipWriter.open(path) do |gzip|
-        Archive::Tar::Minitar.open(gzip, 'w') do |stream|
-          @stream = stream
-          @config = {:tables => {}}
-          yield(self)
+        gzip.mtime = Time.utc(2000)
+        lock do
+          Archive::Tar::Minitar.open(gzip, 'w') do |stream|
+            @stream = stream
+            @config = {:tables => {}}
+            yield(self)
+          end
         end
       end
     end
 
     def create_file(name)
-      Tempfile.open('dumper') do |temp|
+      Tempfile.open('dump') do |temp|
         yield(temp)
         temp.open
         stream.tar.add_file_simple(name, :mode => 0100444, :size => temp.length) do |f|
@@ -36,7 +39,7 @@ class DumpRake
 
     def write_schema
       create_file('schema.rb') do |f|
-        with_env('SCHEMA', f.path) do
+        DumpRake::Env.with_env('SCHEMA' => f.path) do
           Rake::Task['db:schema:dump'].invoke
         end
       end
@@ -74,24 +77,31 @@ class DumpRake
     def write_assets
       assets = assets_to_dump
       unless assets.blank?
-        config[:assets] = []
-        create_file('assets.tar') do |f|
-          Dir.chdir(RAILS_ROOT) do
-            Archive::Tar::Minitar.open(f, 'w') do |outp|
-              Dir[*assets].each_with_progress('Assets') do |asset|
-                config[:assets] << asset
-                Dir[File.join(asset, '**', '*')].each_with_progress(asset) do |entry|
-                  begin
-                    Archive::Tar::Minitar.pack_file(entry, outp)
-                  rescue => e
-                    puts "Skipped asset due to error #{e}"
+        config[:assets] = {}
+        Dir.chdir(RAILS_ROOT) do
+          assets = Dir[*assets].uniq
+          Progress.start('Assets', assets.length + 1) do
+            create_file('assets.tar') do |assets_tar|
+              Archive::Tar::Minitar.open(assets_tar, 'w') do |outp|
+                assets.each do |asset|
+                  paths = Dir[File.join(asset, '**', '*')]
+                  files = paths.select{ |path| File.file?(path) }
+                  config[:assets][asset] = {:total => paths.length, :files => files.length}
+                  paths.each_with_progress(asset) do |entry|
+                    begin
+                      Archive::Tar::Minitar.pack_file(entry, outp)
+                    rescue => e
+                      $stderr.puts "Skipped asset due to error #{e}"
+                    end
                   end
-                  sleep 0.2
+                  Progress.step
                 end
               end
+              Progress.start("Putting assets into dump", 1)
             end
+            Progress.stop
+            Progress.step
           end
-          Progress.start("Putting assets into dump", 1){}
         end
       end
     end
@@ -103,7 +113,19 @@ class DumpRake
     end
 
     def tables_to_dump
-      ActiveRecord::Base.connection.tables - %w(sessions)
+      avaliable_tables = ActiveRecord::Base.connection.tables
+      if DumpRake::Env[:tables]
+        env_tables = DumpRake::Env[:tables].dup
+        prefix = env_tables.slice!(/^\-/)
+        candidates = env_tables.split(',').map(&:strip).map(&:downcase).uniq.reject(&:blank?)
+        if prefix
+          avaliable_tables - (candidates - schema_tables)
+        else
+          avaliable_tables & (candidates | schema_tables)
+        end
+      else
+        avaliable_tables - %w(sessions)
+      end
     end
 
     def table_rows(table)
@@ -113,7 +135,7 @@ class DumpRake
     def assets_to_dump
       begin
         Rake::Task['assets'].invoke
-        ENV['ASSETS'].split(':')
+        DumpRake::Env[:assets].split(/[:,]/)
       rescue
         []
       end

@@ -12,6 +12,65 @@ class DumpRake
       end
     end
 
+    class Summary
+      attr_reader :text
+      alias_method :to_s, :text
+      def initialize
+        @text = ''
+      end
+
+      def header(header)
+        @text << "  #{header}:\n"
+      end
+
+      def data(entries)
+        entries.each do |entry|
+          @text << "    #{entry}\n"
+        end
+      end
+
+      # from ActionView::Helpers::TextHelper
+      def self.pluralize(count, singular)
+        "#{count} #{count == 1 ? singular : singular.pluralize}"
+      end
+    end
+
+    def self.summary(path, options = {})
+      new(path).open do |dump|
+        dump.read_config
+
+        sum = Summary.new
+
+        tables = dump.config[:tables]
+        sum.header 'Tables'
+        sum.data tables.sort.map{ |(table, rows)|
+          "#{table}: #{Summary.pluralize(rows, 'row')}"
+        }
+
+        assets = dump.config[:assets]
+        sum.header 'Assets'
+        sum.data assets.sort.map{ |entry|
+          if String === entry
+            entry
+          else
+            asset, paths = entry
+            if Hash === paths
+              "#{asset}: #{Summary.pluralize paths[:files], 'file'} (#{Summary.pluralize paths[:total], 'entry'} total)"
+            else
+              "#{asset}: #{Summary.pluralize paths, 'entry'}"
+            end
+          end
+        }
+
+        if options[:schema]
+          sum.header 'Schema'
+          sum.data dump.schema.split("\n")
+        end
+
+        sum
+      end
+    end
+
     def open
       Zlib::GzipReader.open(path) do |gzip|
         Archive::Tar::Minitar.open(gzip, 'r') do |stream|
@@ -52,11 +111,15 @@ class DumpRake
 
     def read_schema
       read_entry_to_file('schema.rb') do |f|
-        with_env('SCHEMA', f.path) do
+        DumpRake::Env.with_env('SCHEMA' => f.path) do
           Rake::Task['db:schema:load'].invoke
         end
         Rake::Task['db:schema:dump'].invoke
       end
+    end
+
+    def schema
+      read_entry('schema.rb')
     end
 
     def read_tables
@@ -96,28 +159,37 @@ class DumpRake
 
     def read_assets
       unless config[:assets].blank?
-        with_env('ASSETS', config[:assets].join(':')) do
+        assets = config[:assets]
+        if Hash === assets
+          assets_count = assets.values.sum{ |value| Hash === value ? value[:total] : value }
+          assets_paths = assets.keys
+        else
+          assets_count, assets_paths = nil, assets
+        end
+
+        DumpRake::Env.with_env('ASSETS' => assets_paths.join(':')) do
           Rake::Task['assets:delete'].invoke
         end
 
-        Progress.start('Assets') do
-          find_entry('assets.tar') do |entry|
-            def entry.rewind
+        Progress.start('Assets', assets_count || 1) do
+          find_entry('assets.tar') do |assets_tar|
+            def assets_tar.rewind
               # rewind will fail - it must go to center of gzip
               # also we don't need it - this is last step in dump restore
             end
-            Archive::Tar::Minitar.unpack(entry, RAILS_ROOT)
+            Archive::Tar::Minitar.open(assets_tar) do |inp|
+              inp.each do |entry|
+                inp.extract_entry(RAILS_ROOT, entry)
+                Progress.step if assets_count
+              end
+            end
           end
-          Progress.step
+          Progress.step unless assets_count
         end
       end
     end
 
   protected
-
-    def schema_tables
-      %w(schema_info schema_migrations)
-    end
 
     def clear_table(table_sql)
       ActiveRecord::Base.connection.delete("DELETE FROM #{table_sql}", 'Clearing table')

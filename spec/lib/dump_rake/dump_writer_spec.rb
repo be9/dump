@@ -38,10 +38,12 @@ describe DumpWriter do
       FileUtils.stub!(:mkpath)
       @gzip = mock('gzip')
       @stream = mock('stream')
-      Zlib::GzipWriter.should_receive(:open).with("123.tgz").and_yield(@gzip)
+      Zlib::GzipWriter.should_receive(:open).with(Pathname("123.tgz")).and_yield(@gzip)
       Archive::Tar::Minitar::Output.should_receive(:open).with(@gzip).and_yield(@stream)
+      @gzip.should_receive(:mtime=).with(Time.utc(2000))
 
       @dump = DumpWriter.new('123.tgz')
+      @dump.should_receive(:lock).and_yield
       @dump.open do |dump|
         dump.should == @dump
         dump.stream.should == @stream
@@ -88,7 +90,7 @@ describe DumpWriter do
       it "should set ENV[SCHEMA] to path of returned file" do
         @file = mock('file', :path => 'db/schema.rb')
         @dump.stub!(:create_file).and_yield(@file)
-        @dump.should_receive(:with_env).with('SCHEMA', 'db/schema.rb')
+        DumpRake::Env.should_receive(:with_env).with('SCHEMA' => 'db/schema.rb')
         @dump.write_schema
       end
 
@@ -227,7 +229,8 @@ describe DumpWriter do
         Dir.should_receive(:[]).with(*%w(images/* videos)).and_return(%w(images/a images/b videos))
 
         @dump.write_assets
-        @config[:assets].should == %w(images/a images/b videos)
+        counts = {:files => 0, :total => 0}
+        @config[:assets].should == {'images/a' => counts, 'images/b' => counts, 'videos' => counts}
       end
 
       it "should use glob to find files" do
@@ -316,6 +319,42 @@ describe DumpWriter do
         ActiveRecord::Base.connection.should_receive(:tables).and_return(%w(first second schema_info schema_migrations sessions))
         @dump.tables_to_dump.should == %w(first second schema_info schema_migrations)
       end
+
+      describe "with user defined tables" do
+        before do
+          ActiveRecord::Base.connection.should_receive(:tables).and_return(%w(first second schema_info schema_migrations sessions))
+        end
+
+        it "should select certain tables" do
+          DumpRake::Env.with_env(:tables => 'first,third,-fifth') do
+            @dump.tables_to_dump.should == %w(first schema_info schema_migrations)
+          end
+        end
+
+        it "should select skip certain tables" do
+          DumpRake::Env.with_env(:tables => '-first,third,-fifth') do
+            @dump.tables_to_dump.should == %w(second schema_info schema_migrations sessions)
+          end
+        end
+
+        it "should not exclude sessions table from result if asked to exclude nothing" do
+          DumpRake::Env.with_env(:tables => '-') do
+            @dump.tables_to_dump.should == %w(first second schema_info schema_migrations sessions)
+          end
+        end
+
+        it "should not exclude schema tables" do
+          DumpRake::Env.with_env(:tables => '-second,schema_info,schema_migrations') do
+            @dump.tables_to_dump.should == %w(first schema_info schema_migrations sessions)
+          end
+        end
+
+        it "should not exclude schema tables ever if asked to dump only certain tables" do
+          DumpRake::Env.with_env(:tables => 'second') do
+            @dump.tables_to_dump.should == %w(second schema_info schema_migrations)
+          end
+        end
+      end
     end
 
     describe "table_rows" do
@@ -334,18 +373,27 @@ describe DumpWriter do
         @dump.assets_to_dump
       end
 
-      it "should return array of assets" do
+      it "should return array of assets if separator is colon" do
         @task = mock('task')
         Rake::Task.stub!(:[]).and_return(@task)
         @task.stub!(:invoke)
-        with_env('ASSETS', 'images:videos') do
+        DumpRake::Env.with_env('ASSETS' => 'images:videos') do
+          @dump.assets_to_dump.should == %w(images videos)
+        end
+      end
+
+      it "should return array of assets if separator is comma" do
+        @task = mock('task')
+        Rake::Task.stub!(:[]).and_return(@task)
+        @task.stub!(:invoke)
+        DumpRake::Env.with_env('ASSETS' => 'images,videos') do
           @dump.assets_to_dump.should == %w(images videos)
         end
       end
 
       it "should return empty array if calling rake task assets raises an exception" do
         Rake::Task.stub!(:[]).and_raise('task assets not found')
-        with_env('ASSETS', 'images:videos') do
+        DumpRake::Env.with_env('ASSETS' => 'images:videos') do
           @dump.assets_to_dump.should == []
         end
       end

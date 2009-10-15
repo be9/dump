@@ -9,7 +9,7 @@ describe "rake dump" do
     Rake::Task.define_task(:environment)
   end
 
-  %w(versions create restore).each do |task|
+  %w(versions create restore cleanup).each do |task|
     describe task do
       it "should require environment task" do
         @rake["dump:#{task}"].prerequisites.should include("environment")
@@ -27,11 +27,13 @@ describe "rake dump" do
       @task.invoke
     end
 
-    %w(VER VERSION LIKE).each do |name|
-      it "should pass version if it is set through environment variable #{name}" do
-        DumpRake.should_receive(:versions).with('21376')
-        with_env name, '21376' do
-          @task.invoke
+    DumpRake::Env.variable_names_for_command(:versions) do |variable|
+      DumpRake::Env.dictionary[variable].each do |name|
+        it "should pass version if it is set through environment variable #{name}" do
+          DumpRake.should_receive(:versions).with(variable => '21376')
+          DumpRake::Env.with_env name => '21376' do
+            @task.invoke
+          end
         end
       end
     end
@@ -47,11 +49,13 @@ describe "rake dump" do
       @task.invoke
     end
 
-    %w(DESC DESCRIPTION).each do |name|
-      it "should pass description if it is set through environment variable #{name}" do
-        DumpRake.should_receive(:create).with(:description => 'simple dump')
-        with_env name, 'simple dump' do
-          @task.invoke
+    DumpRake::Env.variable_names_for_command(:create) do |variable|
+      DumpRake::Env.dictionary[variable].each do |name|
+        it "should pass description if it is set through environment variable #{name}" do
+          DumpRake.should_receive(:create).with(variable => 'simple dump')
+          DumpRake::Env.with_env name => 'simple dump' do
+            @task.invoke
+          end
         end
       end
     end
@@ -67,11 +71,35 @@ describe "rake dump" do
       @task.invoke
     end
 
-    %w(VER VERSION LIKE).each do |name|
-      it "should pass version if it is set through environment variable #{name}" do
-        DumpRake.should_receive(:restore).with('21378')
-        with_env name, '21378' do
-          @task.invoke
+    DumpRake::Env.variable_names_for_command(:restore) do |variable|
+      DumpRake::Env.dictionary[variable].each do |name|
+        it "should pass version if it is set through environment variable #{name}" do
+          DumpRake.should_receive(:restore).with(variable => '21378')
+          DumpRake::Env.with_env name => '21378' do
+            @task.invoke
+          end
+        end
+      end
+    end
+  end
+
+  describe "cleanup" do
+    before do
+      @task = @rake["dump:cleanup"]
+    end
+
+    it "should call DumpRake.cleanup" do
+      DumpRake.should_receive(:cleanup)
+      @task.invoke
+    end
+
+    DumpRake::Env.variable_names_for_command(:cleanup) do |variable|
+      DumpRake::Env.dictionary[variable].each do |name|
+        it "should pass version if it is set through environment variable #{name}" do
+          DumpRake.should_receive(:versions).with(variable => '21376')
+          DumpRake::Env.with_env name => '21376' do
+            @task.invoke
+          end
         end
       end
     end

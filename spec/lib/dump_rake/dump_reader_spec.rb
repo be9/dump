@@ -41,11 +41,109 @@ describe DumpReader do
     end
   end
 
+  describe "summary" do
+    Summary = DumpReader::Summary
+    describe Summary do
+      it "should format text" do
+        @summary = Summary.new
+        @summary.header 'One'
+        @summary.data(%w(fff ggg jjj ppp qqq www))
+        @summary.header 'Two'
+        @summary.data([['fff', 234], ['ggg', 321], ['jjj', 666], ['ppp', 678], ['qqq', 123], ['www', 345]].map{ |entry| entry.join(': ') })
+
+        output = <<-TEXT
+          One:
+            fff
+            ggg
+            jjj
+            ppp
+            qqq
+            www
+          Two:
+            fff: 234
+            ggg: 321
+            jjj: 666
+            ppp: 678
+            qqq: 123
+            www: 345
+        TEXT
+        "#{@summary}".should == output.gsub(/#{output[/^\s+/]}/, '  ')
+      end
+
+      it "should pluralize" do
+        Summary.pluralize(0, 'file').should == '0 files'
+        Summary.pluralize(1, 'file').should == '1 file'
+        Summary.pluralize(10, 'file').should == '10 files'
+      end
+    end
+
+    it "should create selves instance and open" do
+      @dump = mock('dump')
+      @dump.should_receive(:open)
+      DumpReader.should_receive(:new).with('/abc/123.tmp').and_return(@dump)
+      DumpReader.summary('/abc/123.tmp')
+    end
+
+    {
+      {'path/a' => {:total => 20, :files => 10}, 'path/b' => {:total => 20, :files => 10}} => ['path/a: 10 files (20 entries total)', 'path/b: 10 files (20 entries total)'],
+      {'path/a' => 10, 'path/b' => 20} => ['path/a: 10 entries', 'path/b: 20 entries'],
+      %w(path/a path/b) => %w(path/a path/b),
+    }.each do |assets, formatted_assets|
+      it "should call dump subroutines and create summary" do
+        tables = {'a' => 10, 'b' => 20, 'c' => 666}
+        formatted_tables = ['a: 10 rows', 'b: 20 rows', 'c: 666 rows']
+
+        @dump = mock('dump')
+        @dump.stub!(:config).and_return(:tables => tables, :assets => assets)
+        @dump.stub!(:open).and_yield(@dump)
+        DumpReader.stub!(:new).and_return(@dump)
+        @dump.should_receive(:read_config)
+
+        @summary = mock('summary')
+        @summary.should_receive(:header).with('Tables')
+        @summary.should_receive(:data).with(formatted_tables)
+        @summary.should_receive(:header).with('Assets')
+        @summary.should_receive(:data).with(formatted_assets)
+        Summary.stub!(:new).and_return(@summary)
+
+        DumpReader.summary('/abc/123.tmp').should == @summary
+      end
+    end
+
+    it "should call dump subroutines and create summary with schema" do
+      tables = {'a' => 10, 'b' => 20, 'c' => 666}
+      formatted_tables = ['a: 10 rows', 'b: 20 rows', 'c: 666 rows']
+      assets = formatted_assets = %w(path/a path/b)
+
+      schema = mock('schema')
+      schema_lines = mock('schema_lines')
+      schema.should_receive(:split).with("\n").and_return(schema_lines)
+
+      @dump = mock('dump')
+      @dump.stub!(:config).and_return(:tables => tables, :assets => assets)
+      @dump.stub!(:open).and_yield(@dump)
+      @dump.stub!(:schema).and_return(schema)
+      DumpReader.stub!(:new).and_return(@dump)
+      @dump.should_receive(:read_config)
+
+      @summary = mock('summary')
+      @summary.should_receive(:header).with('Tables')
+      @summary.should_receive(:data).with(formatted_tables)
+      @summary.should_receive(:header).with('Assets')
+      @summary.should_receive(:data).with(formatted_assets)
+      @summary.should_receive(:header).with('Schema')
+      @summary.should_receive(:data).with(schema_lines)
+      Summary.stub!(:new).and_return(@summary)
+
+      DumpReader.summary('/abc/123.tmp', :schema => true).should == @summary
+    end
+  end
+
   describe "open" do
     it "should set stream to gzipped tar reader" do
       @gzip = mock('gzip')
       @stream = mock('stream')
-      Zlib::GzipReader.should_receive(:open).with("123.tgz").and_yield(@gzip)
+      Zlib::GzipReader.should_receive(:open).with(Pathname("123.tgz")).and_yield(@gzip)
       Archive::Tar::Minitar::Input.should_receive(:open).with(@gzip).and_yield(@stream)
 
       @dump = DumpReader.new('123.tgz')
@@ -156,7 +254,7 @@ describe DumpReader do
         @file = mock('tempfile', :path => '/temp/123-arst')
         @dump.stub!(:read_entry_to_file).and_yield(@file)
 
-        @dump.should_receive(:with_env).with('SCHEMA', '/temp/123-arst')
+        DumpRake::Env.should_receive(:with_env).with('SCHEMA' => '/temp/123-arst')
         @dump.read_schema
       end
 
@@ -172,6 +270,14 @@ describe DumpReader do
         @dump_task.should_receive(:invoke)
 
         @dump.read_schema
+      end
+    end
+
+    describe "schema" do
+      it "should read schema" do
+        @data = %q{create table, rows, etc...}
+        @dump.should_receive(:read_entry).with('schema.rb').and_return(@data)
+        @dump.schema.should == @data
       end
     end
 
@@ -311,7 +417,7 @@ describe DumpReader do
           @dump.stub!(:find_entry)
 
           def @task.invoke
-            ENV['ASSETS'].should == 'images:videos'
+            DumpRake::Env[:assets].should == 'images:videos'
           end
 
           @dump.read_assets
@@ -328,27 +434,32 @@ describe DumpReader do
         @dump.read_assets
       end
 
-      it "should rewrite rewind method to empty method - to not raise exception and call Archive::Tar::Minitar.unpack" do
-        @assets = %w(images videos)
-        @dump.stub!(:config).and_return({:assets => @assets})
-        Dir.stub!(:glob).and_return([])
-        FileUtils.stub!(:remove_entry_secure)
+      [
+        %w(images videos),
+        {'images' => 0, 'videos' => 0},
+        {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
+      ].each do |assets|
+        it "should rewrite rewind method to empty method - to not raise exception, open tar and extract each entry" do
+          @dump.stub!(:config).and_return({:assets => assets})
+          Dir.stub!(:glob).and_return([])
+          FileUtils.stub!(:remove_entry_secure)
 
-        @entry = mock('entry')
-        @entry.stub!(:rewind).and_raise('hehe - we want to rewind to center of gzip')
-        @dump.stub!(:find_entry).and_yield(@entry)
+          @assets_tar = mock('assets_tar')
+          @assets_tar.stub!(:rewind).and_raise('hehe - we want to rewind to center of gzip')
+          @dump.stub!(:find_entry).and_yield(@assets_tar)
 
-        Archive::Tar::Minitar.should_receive(:unpack).and_return do |entry, path|
-          entry.rewind
-          path.should == RAILS_ROOT
+          @inp = mock('inp')
+          each_excpectation = @inp.should_receive(:each)
+          @entries = %w(a b c d).map do |s|
+            file = mock("file_#{s}")
+            each_excpectation.and_yield(file)
+            @inp.should_receive(:extract_entry).with(RAILS_ROOT, file)
+            file
+          end
+          Archive::Tar::Minitar.should_receive(:open).with(@assets_tar).and_yield(@inp)
+
+          @dump.read_assets
         end
-        @dump.read_assets
-      end
-    end
-
-    describe "schema_tables" do
-      it "should return schema_tables" do
-        DumpReader.new('').send(:schema_tables).should == %w(schema_info schema_migrations)
       end
     end
 
