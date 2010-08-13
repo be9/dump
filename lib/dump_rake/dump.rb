@@ -1,5 +1,8 @@
+require 'backported_tmpdir' unless Dir.respond_to?(:mktmpdir)
+
 class DumpRake
   class Dump
+    include TableManipulation
     def self.list(options = {})
       dumps = Dir[File.join(RAILS_ROOT, 'dump', options[:all] ? '*.*' : '*.tgz')].sort.select{ |path| File.file?(path) }.map{ |path| new(path) }
       dumps = dumps.select{ |dump| dump.name[options[:like]] } if options[:like]
@@ -82,6 +85,22 @@ class DumpRake
     end
     alias to_s name
 
+    def size
+      File.size(path) rescue nil
+    end
+
+    def human_size
+      number = size
+      return nil if number.nil?
+      degree = 0
+      symbols = %W(B K M G T)
+      while number >= 1000 && degree < symbols.length - 1
+        degree += 1
+        number /= 1024.0
+      end
+      "#{'%.2f' % number}#{symbols[degree]}"
+    end
+
     def inspect
       "#<%s:0x%x %s>" % [self.class, object_id, path.to_s.sub(/^.+(?=..\/[^\/]*$)/, '…')]
     end
@@ -101,63 +120,56 @@ class DumpRake
 
   protected
 
-    def verify_connection
-      ActiveRecord::Base.connection.verify!(0)
-    end
-
-    def quote_table_name(table)
-      ActiveRecord::Base.connection.quote_table_name(table)
-    end
-
-  private
-
-    def schema_tables
-      %w(schema_info schema_migrations)
+    def assets_root_link
+      prefix = 'assets'
+      Dir.mktmpdir do |dir|
+        Dir.chdir(dir) do
+          File.symlink(RAILS_ROOT, prefix)
+          begin
+            yield dir, prefix
+          ensure
+            File.unlink(prefix)
+          end
+        end
+      end
     end
 
     def path_with_ext(ext)
       Pathname(path.to_s.sub(/#{parts[:ext]}$/, ext))
     end
 
-    def self.instance_accessible_methods(*methods)
-      methods.each do |method|
-        class_eval <<-code, __FILE__, __LINE__
-          def #{method}(*args, &block)
-            self.class.#{method}(*args, &block)
-          end
-        code
+    module CleanNParse
+      def clean_str(str, additional = nil)
+        str.to_s.strip.gsub(/\s+/, ' ').gsub(/[^A-Za-z0-9 \-_#{Regexp.escape(additional.to_s) if additional}]+/, '_')
       end
-    end
-
-    def self.clean_str(str, additional = nil)
-      str.to_s.strip.gsub(/\s+/, ' ').gsub(/[^A-Za-z0-9 \-_#{Regexp.escape(additional.to_s) if additional}]+/, '_')
-    end
-    def self.clean_description(description)
-      clean_str(description, '()#')[0, 50].strip
-    end
-    def self.clean_tag(tag)
-      clean_str(tag).downcase.sub(/^\-+/, '')[0, 20].strip
-    end
-    def self.clean_tags(tags)
-      tags.to_s.split(',').map{ |tag| clean_tag(tag) }.uniq.reject(&:blank?).sort
-    end
-    def self.get_filter_tags(tags)
-      groups = Hash.new{ |hash, key| hash[key] = SortedSet.new }
-      tags.to_s.split(',').each do |tag|
-        if m = tag.strip.match(/^(\-|\+)?(.*)$/)
-          type = {'+' => :mandatory, '-' => :forbidden}[m[1]] || :simple
-          unless (claned_tag = clean_tag(m[2])).blank?
-            groups[type] << claned_tag
+      def clean_description(description)
+        clean_str(description, '()#')[0, 50].strip
+      end
+      def clean_tag(tag)
+        clean_str(tag).downcase.sub(/^\-+/, '')[0, 20].strip
+      end
+      def clean_tags(tags)
+        tags.to_s.split(',').map{ |tag| clean_tag(tag) }.uniq.reject(&:blank?).sort
+      end
+      def get_filter_tags(tags)
+        groups = Hash.new{ |hash, key| hash[key] = SortedSet.new }
+        tags.to_s.split(',').each do |tag|
+          if m = tag.strip.match(/^(\-|\+)?(.*)$/)
+            type = {'+' => :mandatory, '-' => :forbidden}[m[1]] || :simple
+            unless (claned_tag = clean_tag(m[2])).blank?
+              groups[type] << claned_tag
+            end
           end
         end
-      end
-      [:simple, :mandatory].each do |type|
-        if (clashing = (groups[type] & groups[:forbidden])).present?
-          raise "#{type} tags clashes with forbidden ones: #{clashing}"
+        [:simple, :mandatory].each do |type|
+          if (clashing = (groups[type] & groups[:forbidden])).present?
+            raise "#{type} tags clashes with forbidden ones: #{clashing}"
+          end
         end
+        groups.each_with_object({}){ |(key, value), hsh| hsh[key] = value.to_a }
       end
-      groups.each_with_object({}){ |(key, value), hsh| hsh[key] = value.to_a }
     end
-    instance_accessible_methods :clean_str, :clean_description, :clean_tag, :clean_tags, :get_filter_tags
+    include CleanNParse
+    extend CleanNParse
   end
 end

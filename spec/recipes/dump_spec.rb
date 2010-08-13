@@ -35,39 +35,57 @@ describe "cap dump" do
 
   describe "do_transfer" do
     before do
-      @cap.dump.stub!(:do_transfer_with_rsync)
       @cap.dump.stub!(:do_transfer_via)
     end
 
     [:up, :down].each do |direction|
-      describe "direction" do
-        it "should first try rsync" do
-          @cap.dump.should_receive(:do_transfer_with_rsync).and_return(true)
-          @cap.dump.should_not_receive(:do_transfer_via)
-          grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
-        end
+      describe direction do
+        describe "if method not set" do
 
-        it "should try sftp after rsync" do
-          @cap.dump.should_receive(:do_transfer_with_rsync).and_return(false)
-          @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz')
-          @cap.dump.should_not_receive(:do_transfer_via)
-          grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
-        end
-
-        it "should try scp after sftp and rsync" do
-          @cap.dump.should_receive(:do_transfer_with_rsync).and_return(false)
-          @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz').and_raise('problem using sftp')
-          @cap.dump.should_receive(:do_transfer_via).with(:scp, direction, 'a.tgz', 'b.tgz')
-          grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
-        end
-
-        it "should not rescue if nothing works" do
-          @cap.dump.should_receive(:do_transfer_with_rsync).and_return(false)
-          @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz').and_raise('problem using sftp')
-          @cap.dump.should_receive(:do_transfer_via).with(:scp, direction, 'a.tgz', 'b.tgz').and_raise('problem using scp')
-          proc{
+          it "should call got_rsync?" do
+            @cap.dump.should_receive(:got_rsync?)
             grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
-          }.should raise_error('problem using scp')
+          end
+
+          describe "if got_rsync?" do
+            it "should use rsync" do
+              @cap.dump.stub!(:got_rsync?).and_return(true)
+              @cap.dump.should_receive(:do_transfer_via).with(:rsync, direction, 'a.tgz', 'b.tgz')
+              grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
+            end
+
+            it "should raise if rsync fails" do
+              @cap.dump.stub!(:got_rsync?).and_return(true)
+              @cap.dump.should_receive(:do_transfer_via).with(:rsync, direction, 'a.tgz', 'b.tgz').and_raise('problem using rsync')
+              proc{
+                grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
+              }.should raise_error('problem using rsync')
+            end
+          end
+
+          describe "unless got_rsync?" do
+            it "should try sftp" do
+              @cap.dump.stub!(:got_rsync?).and_return(false)
+              @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz')
+              grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
+            end
+
+            it "should try scp after sftp" do
+              @cap.dump.stub!(:got_rsync?).and_return(false)
+              @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz').and_raise('problem using sftp')
+              @cap.dump.should_receive(:do_transfer_via).with(:scp, direction, 'a.tgz', 'b.tgz')
+              grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
+            end
+
+            it "should not rescue if scp also fails" do
+              @cap.dump.stub!(:got_rsync?).and_return(false)
+              @cap.dump.should_receive(:do_transfer_via).with(:sftp, direction, 'a.tgz', 'b.tgz').and_raise('problem using sftp')
+              @cap.dump.should_receive(:do_transfer_via).with(:scp, direction, 'a.tgz', 'b.tgz').and_raise('problem using scp')
+              proc{
+                grab_output{ @cap.dump.do_transfer(direction, 'a.tgz', 'b.tgz') }
+              }.should raise_error('problem using scp')
+            end
+          end
         end
       end
     end
@@ -76,21 +94,21 @@ describe "cap dump" do
   describe "local" do
     describe "versions" do
       it "should call local rake task" do
-        @cap.dump.should_receive(:run_local).with("rake -s dump:versions").and_return('')
+        @cap.dump.should_receive(:run_local).with("rake -s dump:versions SHOW_SIZE=true").and_return('')
         @cap.find_and_execute_task("dump:local:versions")
       end
 
       test_passing_environment_variables(:local, :versions, {
-        :like => "rake -s dump:versions 'LIKE=some data'",
-        :tags => "rake -s dump:versions 'TAGS=some data'",
-        :summary => "rake -s dump:versions 'SUMMARY=some data'",
+        :like => "rake -s dump:versions 'LIKE=some data' SHOW_SIZE=true",
+        :tags => "rake -s dump:versions SHOW_SIZE=true 'TAGS=some data'",
+        :summary => "rake -s dump:versions SHOW_SIZE=true 'SUMMARY=some data'",
       })
 
       it "should print result of rake task" do
-        @cap.dump.stub!(:run_local).and_return("123123.tgz\n")
+        @cap.dump.stub!(:run_local).and_return(" 123M\t123123.tgz\n")
         grab_output{
           @cap.find_and_execute_task("dump:local:versions")
-        }[:stdout].should == "123123.tgz\n"
+        }[:stdout].should == " 123M\t123123.tgz\n"
       end
     end
 
@@ -169,6 +187,7 @@ describe "cap dump" do
       test_passing_environment_variables(:local, :restore, {
         :like => "rake -s dump:restore 'LIKE=some data'",
         :tags => "rake -s dump:restore 'TAGS=some data'",
+        :migrate_down => "rake -s dump:restore 'MIGRATE_DOWN=some data'",
       })
     end
 
@@ -207,26 +226,26 @@ describe "cap dump" do
   describe "remote" do
     describe "versions" do
       it "should call remote rake task" do
-        @cap.dump.should_receive(:run_remote).with("cd #{@remote_path}; rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production").and_return('')
+        @cap.dump.should_receive(:run_remote).with("cd #{@remote_path}; rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production SHOW_SIZE=true").and_return('')
         @cap.find_and_execute_task("dump:remote:versions")
       end
 
       test_passing_environment_variables(:remote, :versions, {
-        :like => "rake -s dump:versions 'LIKE=some data' PROGRESS_TTY=+ RAILS_ENV=production",
-        :tags => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production 'TAGS=some data'",
-        :summary => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production 'SUMMARY=some data'",
+        :like => "rake -s dump:versions 'LIKE=some data' PROGRESS_TTY=+ RAILS_ENV=production SHOW_SIZE=true",
+        :tags => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production SHOW_SIZE=true 'TAGS=some data'",
+        :summary => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production SHOW_SIZE=true 'SUMMARY=some data'",
       })
 
       it "should print result of rake task" do
-        @cap.dump.stub!(:run_remote).and_return("123123.tgz\n")
+        @cap.dump.stub!(:run_remote).and_return(" 123M\t123123.tgz\n")
         grab_output{
           @cap.find_and_execute_task("dump:remote:versions")
-        }[:stdout].should == "123123.tgz\n"
+        }[:stdout].should == " 123M\t123123.tgz\n"
       end
 
       it "should use custom rake binary" do
         @cap.dump.should_receive(:fetch_rake).and_return('/custom/rake')
-        @cap.dump.should_receive(:run_remote).with("cd #{@remote_path}; /custom/rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production").and_return('')
+        @cap.dump.should_receive(:run_remote).with("cd #{@remote_path}; /custom/rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production SHOW_SIZE=true").and_return('')
         @cap.find_and_execute_task("dump:remote:versions")
       end
     end
@@ -334,6 +353,7 @@ describe "cap dump" do
       test_passing_environment_variables(:remote, :restore, {
         :like => "rake -s dump:restore 'LIKE=some data' PROGRESS_TTY=+ RAILS_ENV=production",
         :tags => "rake -s dump:restore PROGRESS_TTY=+ RAILS_ENV=production 'TAGS=some data'",
+        :migrate_down => "rake -s dump:restore 'MIGRATE_DOWN=some data' PROGRESS_TTY=+ RAILS_ENV=production",
       })
 
       it "should use custom rake binary" do

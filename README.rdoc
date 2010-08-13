@@ -20,7 +20,7 @@ When using cap tasks — be sure to link dump folder to persistent place on depl
 This plugin requires gems (but to reduce problems on shared hostings, unpacked versions of archive-tar-minitar-0.5.2 and progress-0.0.9.3 are used if they are not present):
 
   archive/tar/minitar
-  progress (version 0.0.6 or later)
+  progress (version 0.1.1 or later)
 
 To install:
 
@@ -164,3 +164,8 @@ If you are sure that there is no need for autobackup — pass <tt>BACKUP</tt>, <
 
 backup remote on local (create remote dump and download it):
   cap dump:backup
+
+Transferring task will try to transfer using rsync if it is present, else it will try to use sftp and scp
+You can skip those tries if you set <tt>TRANSFER_VIA</tt> to rsync, sftp or scp
+  cap dump:backup TRANSFER_VIA=rsync
+  cap dump:mirror:up TRANSFER_VIA=scp

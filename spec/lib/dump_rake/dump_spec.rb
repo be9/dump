@@ -214,20 +214,6 @@ describe Dump do
     end
   end
 
-  describe "verify_connection" do
-    it "should return result of ActiveRecord::Base.connection.verify!" do
-      ActiveRecord::Base.connection.should_receive(:verify!).and_return(:result)
-      Dump.new('').send(:verify_connection).should == :result
-    end
-  end
-
-  describe "quote_table_name" do
-    it "should return result of ActiveRecord::Base.connection.quote_table_name" do
-      ActiveRecord::Base.connection.should_receive(:quote_table_name).with('first').and_return('`first`')
-      Dump.new('').send(:quote_table_name, 'first').should == '`first`'
-    end
-  end
-
   describe "clean_description" do
     it "should shorten string to 50 chars and replace special symblos with '-'" do
       Dump.new('').send(:clean_description, 'Special  Dump #12837192837 (before fixind *&^*&^ photos)').should == 'Special Dump #12837192837 (before fixind _ photos)'
@@ -286,9 +272,21 @@ describe Dump do
     end
   end
 
-  describe "schema_tables" do
-    it "should return schema_tables" do
-      Dump.new('').send(:schema_tables).should == %w(schema_info schema_migrations)
+  describe "assets_root_link" do
+     it "should create tem dir, chdir there, symlink RAILS_ROOT to assets, yield and unlink assets ever if something raised" do
+      Dir.should_receive(:mktmpdir).and_yield('/tmp/abc')
+      Dir.should_receive(:chdir).with('/tmp/abc').and_yield
+      File.should_receive(:symlink).with(RAILS_ROOT, 'assets')
+      File.should_receive(:unlink).with('assets')
+      proc{
+        Dump.new('').send(:assets_root_link) do |dir, prefix|
+          dir.should == '/tmp/abc'
+          prefix.should == 'assets'
+          @yielded = true
+          raise 'just test'
+        end
+      }.should raise_error('just test')
+      @yielded.should == true
     end
   end
 end

@@ -1,9 +1,11 @@
+# encoding: utf-8
 require 'rubygems'
 
 require 'pathname'
 require 'find'
 require 'fileutils'
 require 'zlib'
+require 'tempfile'
 
 require 'rake'
 
@@ -14,18 +16,18 @@ def require_gem_or_unpacked_gem(name, version = nil)
     gem name, version if version
     require name
   rescue Gem::LoadError, MissingSourceFile
-    $: << Pathname.glob(unpacked_gems_path + "#{name.gsub('/', '-')}*").last + 'lib'
+    $: << Pathname.glob((unpacked_gems_path + "#{name.to_s.gsub('/', '-')}*").to_s).last + 'lib'
     require name
   end
 end
 
 require_gem_or_unpacked_gem 'archive/tar/minitar'
-require_gem_or_unpacked_gem 'progress', '>= 0.0.6'
+require_gem_or_unpacked_gem 'progress', '>= 0.1.1'
 
 class DumpRake
   def self.versions(options = {})
     Dump.list(options).each do |dump|
-      puts dump
+      puts DumpRake::Env[:show_size] || $stdout.tty? ? "#{dump.human_size.to_s.rjust(7)}\t#{dump}" : dump
       if options[:summary]
         begin
           if %w(full 2).include?((options[:summary] || '').downcase)
@@ -63,6 +65,10 @@ class DumpRake
   end
 
   def self.cleanup(options = {})
+    unless options[:leave].nil? || /^\d+$/ === options[:leave] || options[:leave].downcase == 'none'
+      raise 'LEAVE should be number or "none"'
+    end
+
     to_delete = []
 
     all_dumps = Dump.list(options.merge(:all => true))

@@ -2,16 +2,18 @@ $: << File.join(File.dirname(__FILE__), '..', 'lib')
 require 'dump_rake/env'
 require 'shell_escape'
 require 'continious_timeout'
-require 'activesupport'
+begin
+  require 'active_support'
+rescue LoadError
+  require 'activesupport'
+end
 
 namespace :dump do
   def dump_command(command, env = {})
     rake = env.delete(:rake) || 'rake'
 
     # stringify_keys! from activesupport
-    env.keys.each do |key|
-      env[key.to_s] = env.delete(key)
-    end
+    DumpRake::Env.stringify!(env)
 
     env.update(DumpRake::Env.for_command(command, true))
 
@@ -24,56 +26,86 @@ namespace :dump do
     fetch(:rails_env, "production")
   end
 
-  def do_transfer_with_rsync(direction, from, to)
-    if run_local('which rsync').present? && $?.success?
-      execute_on_servers do |servers|
-        commands = servers.map do |server|
-          target = sessions[server]
-          user = target.options[:user]
-          host = target.host
-          full_host = user.present? ? "#{user}@#{host}" : host
-
-          cmd = %W(rsync -P -e ssh)
-          case direction
-          when :up
-            cmd << from << "#{full_host}:#{to}"
-          when :down
-            cmd << "#{full_host}:#{from}" << to
-          else
-            raise "Don't know how to transfer in direction #{direction}"
-          end
-          ShellEscape.command(*cmd)
-        end
-        return commands.all? do |cmd|
-          logger.info cmd if logger
-          system *cmd
-        end
-      end
-    end
+  def got_rsync?
+    `which rsync`
+    $?.success?
   end
 
   def do_transfer_via(via, direction, from, to)
-    ContiniousTimeout.timeout 10 do |thread|
-      transfer(direction, from, to, :via => via) do |channel, path, transfered, total|
-        thread.defer
-        progress = if transfered < total
-          "\e[1m%5.1f%%\e[0m" % (transfered * 100.0 / total)
-        else
-          "100%"
+    case via
+    when :rsync
+      if run_local('which rsync').present? && $?.success?
+        execute_on_servers do |servers|
+          commands = servers.map do |server|
+            target = sessions[server]
+            user = target.options[:user] || fetch(:user, nil)
+            host = target.host
+            port = target.options[:port]
+            full_host = "#{"#{user}@" if user.present?}#{host}"
+
+            ssh = port.present? ? "ssh -p #{port}" : 'ssh'
+            cmd = %W(rsync -P -e #{ssh} --timeout=15)
+            case direction
+            when :up
+              cmd << from << "#{full_host}:#{to}"
+            when :down
+              cmd << "#{full_host}:#{from}" << to
+            else
+              raise "Don't know how to transfer in direction #{direction}"
+            end
+            ShellEscape.command(*cmd)
+          end
+          commands.each do |cmd|
+            logger.info cmd if logger
+
+            3.times do
+              break if system(cmd)
+              break unless [10, 11, 12, 23, 30, 35].include?($?.exitstatus)
+            end
+            raise "rsync returned #{$?.exitstatus}" unless $?.success?
+          end
         end
-        $stderr << "\rTransfering: #{progress}"
       end
+    when :sftp, :scp
+      ContiniousTimeout.timeout 15 do |thread|
+        transfer(direction, from, to, :via => via) do |channel, path, transfered, total|
+          thread.defer
+          progress = if transfered < total
+            "\e[1m%5.1f%%\e[0m" % (transfered * 100.0 / total)
+          else
+            "100%"
+          end
+          $stderr << "\rTransfering: #{progress}"
+        end
+      end
+    else
+      raise "Unknown transfer method #{via}"
     end
   end
 
   def do_transfer(direction, from, to)
-    unless do_transfer_with_rsync(direction, from, to)
-      puts "To transfer using rsync — make rsync binary accessible and verify that remote host can work with rsync through ssh"
-      begin
+    if via = DumpRake::Env[:transfer_via]
+      case via.downcase
+      when 'rsync'
+        do_transfer_via(:rsync, direction, from, to)
+      when 'sftp'
         do_transfer_via(:sftp, direction, from, to)
-      rescue => e
-        $stderr.puts e
+      when 'scp'
         do_transfer_via(:scp, direction, from, to)
+      else
+        raise "Unknown transfer method #{via}"
+      end
+    else
+      if got_rsync?
+        do_transfer_via(:rsync, direction, from, to)
+      else
+        $stderr.puts "To transfer using rsync — make rsync binary accessible and verify that remote host can work with rsync through ssh"
+        begin
+          do_transfer_via(:sftp, direction, from, to)
+        rescue => e
+          $stderr.puts e
+          do_transfer_via(:scp, direction, from, to)
+        end
       end
     end
   end
@@ -102,7 +134,6 @@ namespace :dump do
       case io
       when :out
         output << data
-        $stdout << data
       when :err
         $stderr << data
       end
@@ -110,8 +141,10 @@ namespace :dump do
     output
   end
 
-  def last_line(out)
-    out.strip.split(/\s*[\n\r]\s*/).last
+  def last_part_of_last_line(out)
+    if line = out.strip.split(/\s*[\n\r]\s*/).last
+      line.split("\t").last
+    end
   end
 
   def fetch_rake
@@ -119,16 +152,16 @@ namespace :dump do
   end
 
   def auto_backup?
-    !%w(0 n f).include?((DumpRake::Env[:backup] || '').downcase)
+    !%w(0 n f).include?((DumpRake::Env[:backup] || '').downcase.strip[0, 1])
   end
 
   namespace :local do
-    desc "Shorthand for dump:local:create"
+    desc "Shorthand for dump:local:create" << DumpRake::Env.explain_variables_for_command(:create)
     task :default, :roles => :db, :only => {:primary => true} do
       create
     end
 
-    desc "Create local dump"
+    desc "Create local dump" << DumpRake::Env.explain_variables_for_command(:create)
     task :create, :roles => :db, :only => {:primary => true} do
       print_and_return_or_fail do
         with_additional_tags('local') do
@@ -137,22 +170,22 @@ namespace :dump do
       end
     end
 
-    desc "Restore local dump"
+    desc "Restore local dump" << DumpRake::Env.explain_variables_for_command(:restore)
     task :restore, :roles => :db, :only => {:primary => true} do
       run_local(dump_command(:restore))
     end
 
-    desc "Versions of local dumps"
+    desc "Versions of local dumps" << DumpRake::Env.explain_variables_for_command(:versions)
     task :versions, :roles => :db, :only => {:primary => true} do
-      print run_local(dump_command(:versions))
+      print run_local(dump_command(:versions, :show_size => true))
     end
 
-    desc "Cleanup local dumps"
+    desc "Cleanup local dumps" << DumpRake::Env.explain_variables_for_command(:cleanup)
     task :cleanup, :roles => :db, :only => {:primary => true} do
       print run_local(dump_command(:cleanup))
     end
 
-    desc "Upload dump"
+    desc "Upload dump" << DumpRake::Env.explain_variables_for_command(:transfer)
     task :upload, :roles => :db, :only => {:primary => true} do
 <<<<<<< HEAD
       files = run_local(dump_command(:versions)).split("\n")
@@ -161,7 +194,7 @@ namespace :dump do
         transfer_with_progress :up, "dump/#{file}", "#{current_path}/dump/#{file}", :via => :scp
 =======
       file = DumpRake::Env.with_env(:summary => nil) do
-        last_line(run_local(dump_command(:versions)))
+        last_part_of_last_line(run_local(dump_command(:versions)))
       end
       if file
         do_transfer :up, "dump/#{file}", "#{current_path}/dump/#{file}"
@@ -171,12 +204,12 @@ namespace :dump do
   end
 
   namespace :remote do
-    desc "Shorthand for dump:remote:create"
+    desc "Shorthand for dump:remote:create" << DumpRake::Env.explain_variables_for_command(:create)
     task :default, :roles => :db, :only => {:primary => true} do
       remote.create
     end
 
-    desc "Create remote dump"
+    desc "Create remote dump" << DumpRake::Env.explain_variables_for_command(:create)
     task :create, :roles => :db, :only => {:primary => true} do
       print_and_return_or_fail do
         with_additional_tags('remote') do
@@ -185,27 +218,28 @@ namespace :dump do
       end
     end
 
-    desc "Restore remote dump"
+    desc "Restore remote dump" << DumpRake::Env.explain_variables_for_command(:restore)
     task :restore, :roles => :db, :only => {:primary => true} do
       run_remote("cd #{current_path}; #{dump_command(:restore, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}")
     end
 
-    desc "Versions of remote dumps"
+    desc "Versions of remote dumps" << DumpRake::Env.explain_variables_for_command(:versions)
     task :versions, :roles => :db, :only => {:primary => true} do
-      print run_remote("cd #{current_path}; #{dump_command(:versions, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}")
+      print run_remote("cd #{current_path}; #{dump_command(:versions, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+', :show_size => true)}")
     end
 
-    desc "Cleanup of remote dumps"
+    desc "Cleanup of remote dumps" << DumpRake::Env.explain_variables_for_command(:cleanup)
     task :cleanup, :roles => :db, :only => {:primary => true} do
       print run_remote("cd #{current_path}; #{dump_command(:cleanup, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}")
     end
 
-    desc "Download dump"
+    desc "Download dump" << DumpRake::Env.explain_variables_for_command(:transfer)
     task :download, :roles => :db, :only => {:primary => true} do
       file = DumpRake::Env.with_env(:summary => nil) do
-        last_line(run_remote("cd #{current_path}; #{dump_command(:versions, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}"))
+        last_part_of_last_line(run_remote("cd #{current_path}; #{dump_command(:versions, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}"))
       end
       if file
+        require 'fileutils'
         FileUtils.mkpath('dump')
 <<<<<<< HEAD
         file.strip!
@@ -218,7 +252,7 @@ namespace :dump do
   end
 
   namespace :mirror do
-    desc "Creates local dump, uploads and restores on remote"
+    desc "Creates local dump, uploads and restores on remote" << DumpRake::Env.explain_variables_for_command(:mirror)
     task :up, :roles => :db, :only => {:primary => true} do
       auto_backup = if auto_backup?
         with_additional_tags('auto-backup') do
@@ -238,7 +272,7 @@ namespace :dump do
       end
     end
 
-    desc "Creates remote dump, downloads and restores on local"
+    desc "Creates remote dump, downloads and restores on local" << DumpRake::Env.explain_variables_for_command(:mirror)
     task :down, :roles => :db, :only => {:primary => true} do
       auto_backup = if auto_backup?
         with_additional_tags('auto-backup') do
@@ -259,7 +293,7 @@ namespace :dump do
     end
   end
 
-  desc "Creates remote dump and downloads to local (desc defaults to 'backup')"
+  desc "Creates remote dump and downloads to local (desc defaults to 'backup')" << DumpRake::Env.explain_variables_for_command(:backup)
   task :backup, :roles => :db, :only => {:primary => true} do
     file = with_additional_tags('backup') do
       remote.create

@@ -59,7 +59,7 @@ describe DumpWriter do
       @dump = DumpWriter.new('123.tgz')
       @dump.stub!(:stream).and_return(@stream)
       @dump.stub!(:config).and_return(@config)
-      Progress.io = StringIO.new
+      Progress.stub!(:io).and_return(StringIO.new)
     end
 
     describe "create_file" do
@@ -123,52 +123,40 @@ describe DumpWriter do
     end
 
     describe "write_table" do
-      before do
+      it "should get row count and store it to config" do
+        @dump.should_receive(:table_row_count).with('first').and_return(666)
+        @dump.stub!(:create_file)
+        @dump.write_table('first')
+        @config[:tables]['first'].should == 666
+      end
+
+      it "should create_file" do
+        @dump.stub!(:table_row_count).and_return(666)
+        @dump.should_receive(:create_file)
+        @dump.write_table('first')
+      end
+
+      it "should dump column names and values of each row" do
         @column_definitions = [
           mock('column', :name => 'id'),
           mock('column', :name => 'name'),
           mock('column', :name => 'associated_id')
         ]
         ActiveRecord::Base.connection.stub!(:columns).and_return(@column_definitions)
-        #
         @rows = [
           {'id' => 1, 'name' => 'a', 'associated_id' => 100},
           {'id' => 2, 'name' => 'b', 'associated_id' => 666},
         ]
-      end
 
-      it "should call table_rows" do
-        @dump.should_receive(:table_rows).with('first').and_return([])
-        @dump.write_table('first')
-      end
-
-      it "should not create_file if rows are empty" do
-        @dump.stub!(:table_rows).and_return([])
-        @dump.should_not_receive(:create_file)
-        @dump.write_table('first')
-      end
-
-      it "should create_file if rows are not empty" do
-        @dump.stub!(:table_rows).and_return(@rows)
-        @dump.should_receive(:create_file).with('first.dump')
-        @dump.write_table('first')
-      end
-
-      it "should add table => rows.length to config" do
-        @dump.stub!(:table_rows).and_return(@rows)
-        @dump.stub!(:create_file)
-        @dump.write_table('first')
-        @config[:tables]['first'].should == 2
-      end
-
-      it "should dump column names and values of each row" do
         @file = mock('file')
-        @dump.stub!(:table_rows).and_return(@rows)
+        @dump.stub!(:table_row_count).and_return(666)
         @dump.stub!(:create_file).and_yield(@file)
 
-        column_names = @rows.first.keys.sort
+        column_names = @column_definitions.map(&:name).sort
         @file.should_receive(:write).with(Marshal.dump(column_names)).ordered
+        each_tabler_row_yielder = @dump.should_receive(:each_table_row)
         @rows.each do |row|
+          each_tabler_row_yielder.and_yield(row)
           @file.should_receive(:write).with(Marshal.dump(row.values_at(*column_names))).ordered
           @column_definitions.each do |column_definition|
             column_definition.should_receive(:type_cast).with(row[column_definition.name]).and_return(row[column_definition.name])
@@ -180,22 +168,12 @@ describe DumpWriter do
     end
 
     describe "write_assets" do
+      before do
+        @dump.stub!(:assets_root_link).and_yield('/tmp', 'assets')
+      end
+
       it "should call assets_to_dump" do
         @dump.should_receive(:assets_to_dump).and_return([])
-        @dump.write_assets
-      end
-
-      it "should not create_file if assets are empty" do
-        @dump.stub!(:assets_to_dump).and_return([])
-
-        @dump.should_not_receive(:create_file)
-        @dump.write_assets
-      end
-
-      it "should create_file assets.tar if assets are not empty" do
-        @dump.stub!(:assets_to_dump).and_return(%w(images videos))
-
-        @dump.should_receive(:create_file).with('assets.tar')
         @dump.write_assets
       end
 
@@ -205,16 +183,6 @@ describe DumpWriter do
         @dump.stub!(:create_file).and_yield(@file)
 
         Dir.should_receive(:chdir).with(RAILS_ROOT)
-        @dump.write_assets
-      end
-
-      it "should open assets.tar with tar writer" do
-        @file = mock('file')
-        @dump.stub!(:assets_to_dump).and_return(%w(images videos))
-        @dump.stub!(:create_file).and_yield(@file)
-        Dir.stub!(:chdir).and_yield
-
-        Archive::Tar::Minitar::Output.should_receive(:open).with(@file)
         @dump.write_assets
       end
 
@@ -249,6 +217,24 @@ describe DumpWriter do
         @dump.write_assets
       end
 
+      it "should pack each file from assets_root_link" do
+        @file = mock('file')
+        @dump.stub!(:assets_to_dump).and_return(%w(images/* videos))
+        @dump.stub!(:create_file).and_yield(@file)
+        Dir.stub!(:chdir).and_yield
+        @tar = mock('tar_writer')
+        Archive::Tar::Minitar::Output.stub!(:open).and_yield(@tar)
+
+        Dir.should_receive(:[]).with(*%w(images/* videos)).and_return(%w(images/a images/b videos))
+        Dir.should_receive(:[]).with('images/a/**/*').and_return([])
+        Dir.should_receive(:[]).with('images/b/**/*').and_return([])
+        Dir.should_receive(:[]).with('videos/**/*').and_return([])
+
+        @dump.should_receive(:assets_root_link).exactly(3).times
+
+        @dump.write_assets
+      end
+
       it "should pack each file" do
         @file = mock('file')
         @dump.stub!(:assets_to_dump).and_return(%w(images/* videos))
@@ -262,12 +248,9 @@ describe DumpWriter do
         Dir.should_receive(:[]).with('images/b/**/*').and_return(%w(c.jpg d.jpg))
         Dir.should_receive(:[]).with('videos/**/*').and_return(%w(a.mov b.mov))
 
-        Archive::Tar::Minitar.should_receive(:pack_file).with('a.jpg', @tar)
-        Archive::Tar::Minitar.should_receive(:pack_file).with('b.jpg', @tar)
-        Archive::Tar::Minitar.should_receive(:pack_file).with('c.jpg', @tar)
-        Archive::Tar::Minitar.should_receive(:pack_file).with('d.jpg', @tar)
-        Archive::Tar::Minitar.should_receive(:pack_file).with('a.mov', @tar)
-        Archive::Tar::Minitar.should_receive(:pack_file).with('b.mov', @tar)
+        %w(a.jpg b.jpg c.jpg d.jpg a.mov b.mov).each do |file_name|
+          Archive::Tar::Minitar.should_receive(:pack_file).with("assets/#{file_name}", @stream)
+        end
 
         @dump.write_assets
       end
@@ -283,8 +266,8 @@ describe DumpWriter do
         Dir.should_receive(:[]).with(*%w(videos)).and_return(%w(videos))
         Dir.should_receive(:[]).with('videos/**/*').and_return(%w(a.mov b.mov))
 
-        Archive::Tar::Minitar.should_receive(:pack_file).with('a.mov', @tar).and_raise('file not found')
-        Archive::Tar::Minitar.should_receive(:pack_file).with('b.mov', @tar)
+        Archive::Tar::Minitar.should_receive(:pack_file).with('assets/a.mov', @stream).and_raise('file not found')
+        Archive::Tar::Minitar.should_receive(:pack_file).with('assets/b.mov', @stream)
 
         grab_output {
           @dump.write_assets
@@ -309,62 +292,6 @@ describe DumpWriter do
       end
     end
 
-    describe "tables_to_dump" do
-      it "should call ActiveRecord::Base.connection.tables" do
-        ActiveRecord::Base.connection.should_receive(:tables).and_return([])
-        @dump.tables_to_dump
-      end
-
-      it "should exclude sessions table from result" do
-        ActiveRecord::Base.connection.should_receive(:tables).and_return(%w(first second schema_info schema_migrations sessions))
-        @dump.tables_to_dump.should == %w(first second schema_info schema_migrations)
-      end
-
-      describe "with user defined tables" do
-        before do
-          ActiveRecord::Base.connection.should_receive(:tables).and_return(%w(first second schema_info schema_migrations sessions))
-        end
-
-        it "should select certain tables" do
-          DumpRake::Env.with_env(:tables => 'first,third,-fifth') do
-            @dump.tables_to_dump.should == %w(first schema_info schema_migrations)
-          end
-        end
-
-        it "should select skip certain tables" do
-          DumpRake::Env.with_env(:tables => '-first,third,-fifth') do
-            @dump.tables_to_dump.should == %w(second schema_info schema_migrations sessions)
-          end
-        end
-
-        it "should not exclude sessions table from result if asked to exclude nothing" do
-          DumpRake::Env.with_env(:tables => '-') do
-            @dump.tables_to_dump.should == %w(first second schema_info schema_migrations sessions)
-          end
-        end
-
-        it "should not exclude schema tables" do
-          DumpRake::Env.with_env(:tables => '-second,schema_info,schema_migrations') do
-            @dump.tables_to_dump.should == %w(first schema_info schema_migrations sessions)
-          end
-        end
-
-        it "should not exclude schema tables ever if asked to dump only certain tables" do
-          DumpRake::Env.with_env(:tables => 'second') do
-            @dump.tables_to_dump.should == %w(second schema_info schema_migrations)
-          end
-        end
-      end
-    end
-
-    describe "table_rows" do
-      it "should call ActiveRecord::Base.connection.select_all with sql containing quoted table name" do
-        @dump.should_receive(:quote_table_name).and_return('`first`')
-        ActiveRecord::Base.connection.should_receive(:select_all).with("SELECT * FROM `first`")
-        @dump.table_rows('first')
-      end
-    end
-
     describe "assets_to_dump" do
       it "should call rake task assets" do
         @task = mock('task')
@@ -377,7 +304,7 @@ describe DumpWriter do
         @task = mock('task')
         Rake::Task.stub!(:[]).and_return(@task)
         @task.stub!(:invoke)
-        DumpRake::Env.with_env('ASSETS' => 'images:videos') do
+        DumpRake::Env.with_env(:assets => 'images:videos') do
           @dump.assets_to_dump.should == %w(images videos)
         end
       end
@@ -386,14 +313,14 @@ describe DumpWriter do
         @task = mock('task')
         Rake::Task.stub!(:[]).and_return(@task)
         @task.stub!(:invoke)
-        DumpRake::Env.with_env('ASSETS' => 'images,videos') do
+        DumpRake::Env.with_env(:assets => 'images,videos') do
           @dump.assets_to_dump.should == %w(images videos)
         end
       end
 
       it "should return empty array if calling rake task assets raises an exception" do
         Rake::Task.stub!(:[]).and_raise('task assets not found')
-        DumpRake::Env.with_env('ASSETS' => 'images:videos') do
+        DumpRake::Env.with_env(:assets => 'images:videos') do
           @dump.assets_to_dump.should == []
         end
       end

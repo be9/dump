@@ -6,12 +6,14 @@ class DumpRake
 
     def self.create(path)
       new(path).open do |dump|
-        dump.write_schema
+        ActiveRecord::Base.logger.silence do
+          dump.write_schema
 
-        dump.write_tables
-        dump.write_assets
+          dump.write_tables
+          dump.write_assets
 
-        dump.write_config
+          dump.write_config
+        end
       end
     end
 
@@ -55,22 +57,23 @@ class DumpRake
     end
 
     def write_table(table)
-      rows = table_rows(table)
-      unless rows.blank?
-        config[:tables][table] = rows.length
-        Progress.start('Writing dump', 1 + rows.length) do
-          create_file("#{table}.dump") do |f|
-            column_names = rows.first.keys.sort
-            columns_by_name = ActiveRecord::Base.connection.columns(table).index_by(&:name)
-            Marshal.dump(column_names, f)
-            Progress.step
-            rows.each do |row|
-              values = column_names.map do |column|
-                columns_by_name[column].type_cast(row[column])
-              end
-              Marshal.dump(values, f)
-              Progress.step
+      row_count = table_row_count(table)
+      config[:tables][table] = row_count
+      Progress.start(table, 1 + row_count) do
+        create_file("#{table}.dump") do |f|
+          columns = table_columns(table)
+          column_names = columns.map(&:name).sort
+          columns_by_name = columns.index_by(&:name)
+
+          Marshal.dump(column_names, f)
+          Progress.step
+
+          each_table_row(table, row_count) do |row|
+            values = column_names.map do |column|
+              columns_by_name[column].type_cast(row[column])
             end
+            Marshal.dump(values, f)
+            Progress.step
           end
         end
       end
@@ -78,31 +81,23 @@ class DumpRake
 
     def write_assets
       assets = assets_to_dump
-      unless assets.blank?
+      if assets.present?
         config[:assets] = {}
         Dir.chdir(RAILS_ROOT) do
           assets = Dir[*assets].uniq
-          Progress.start('Assets', assets.length + 1) do
-            create_file('assets.tar') do |assets_tar|
-              Archive::Tar::Minitar.open(assets_tar, 'w') do |outp|
-                assets.each do |asset|
-                  paths = Dir[File.join(asset, '**', '*')]
-                  files = paths.select{ |path| File.file?(path) }
-                  config[:assets][asset] = {:total => paths.length, :files => files.length}
-                  paths.each_with_progress(asset) do |entry|
-                    begin
-                      Archive::Tar::Minitar.pack_file(entry, outp)
-                    rescue => e
-                      $stderr.puts "Skipped asset due to error #{e}"
-                    end
-                  end
-                  Progress.step
+          assets.with_progress('Assets').each do |asset|
+            paths = Dir[File.join(asset, '**', '*')]
+            files = paths.select{ |path| File.file?(path) }
+            config[:assets][asset] = {:total => paths.length, :files => files.length}
+            assets_root_link do |tmpdir, prefix|
+              paths.each_with_progress(asset) do |entry|
+                begin
+                  Archive::Tar::Minitar.pack_file(File.join(prefix, entry), stream)
+                rescue => e
+                  $stderr.puts "Skipped asset due to error #{e}"
                 end
               end
-              Progress.start("Putting assets into dump", 1)
             end
-            Progress.stop
-            Progress.step
           end
         end
       end
@@ -112,26 +107,6 @@ class DumpRake
       create_file('config') do |f|
         Marshal.dump(config, f)
       end
-    end
-
-    def tables_to_dump
-      avaliable_tables = ActiveRecord::Base.connection.tables
-      if DumpRake::Env[:tables]
-        env_tables = DumpRake::Env[:tables].dup
-        prefix = env_tables.slice!(/^\-/)
-        candidates = env_tables.split(',').map(&:strip).map(&:downcase).uniq.reject(&:blank?)
-        if prefix
-          avaliable_tables - (candidates - schema_tables)
-        else
-          avaliable_tables & (candidates | schema_tables)
-        end
-      else
-        avaliable_tables - %w(sessions)
-      end
-    end
-
-    def table_rows(table)
-      ActiveRecord::Base.connection.select_all("SELECT * FROM #{quote_table_name(table)}")
     end
 
     def assets_to_dump

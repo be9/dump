@@ -33,6 +33,7 @@ describe DumpReader do
       DumpReader.stub!(:new).and_return(@dump)
 
       @dump.should_receive(:read_config).ordered
+      @dump.should_receive(:migrate_down).ordered
       @dump.should_receive(:read_schema).ordered
       @dump.should_receive(:read_tables).ordered
       @dump.should_receive(:read_assets).ordered
@@ -225,7 +226,7 @@ describe DumpReader do
       @stream = mock('stream')
       @dump = DumpReader.new('123.tgz')
       @dump.stub!(:stream).and_return(@stream)
-      Progress.io = StringIO.new
+      Progress.stub!(:io).and_return(StringIO.new)
     end
 
     describe "read_config" do
@@ -386,6 +387,7 @@ describe DumpReader do
         @task = mock('task')
         Rake::Task.stub!(:[]).with('assets:delete').and_return(@task)
         @task.stub!(:invoke)
+        @dump.stub!(:assets_root_link).and_yield('/tmp', 'assets')
       end
 
       it "should not read assets if config[:assets] is nil" do
@@ -401,6 +403,10 @@ describe DumpReader do
       end
 
       describe "deleting existing assets" do
+        before do
+          @stream.stub!(:each)
+        end
+
         it "should call assets:delete" do
           @assets = %w(images videos)
           @dump.stub!(:config).and_return({:assets => @assets})
@@ -424,101 +430,76 @@ describe DumpReader do
         end
       end
 
-      it "should find assets.tar" do
-        @assets = %w(images videos)
-        @dump.stub!(:config).and_return({:assets => @assets})
-        Dir.stub!(:glob).and_return([])
-        FileUtils.stub!(:remove_entry_secure)
-
-        @dump.should_receive(:find_entry).with('assets.tar')
-        @dump.read_assets
-      end
-
-      [
-        %w(images videos),
-        {'images' => 0, 'videos' => 0},
-        {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
-      ].each do |assets|
-        it "should rewrite rewind method to empty method - to not raise exception, open tar and extract each entry" do
-          @dump.stub!(:config).and_return({:assets => assets})
+      describe "old style" do
+        it "should find assets.tar" do
+          @assets = %w(images videos)
+          @dump.stub!(:config).and_return({:assets => @assets})
           Dir.stub!(:glob).and_return([])
           FileUtils.stub!(:remove_entry_secure)
 
-          @assets_tar = mock('assets_tar')
-          @assets_tar.stub!(:rewind).and_raise('hehe - we want to rewind to center of gzip')
-          @dump.stub!(:find_entry).and_yield(@assets_tar)
-
-          @inp = mock('inp')
-          each_excpectation = @inp.should_receive(:each)
-          @entries = %w(a b c d).map do |s|
-            file = mock("file_#{s}")
-            each_excpectation.and_yield(file)
-            @inp.should_receive(:extract_entry).with(RAILS_ROOT, file)
-            file
-          end
-          Archive::Tar::Minitar.should_receive(:open).with(@assets_tar).and_yield(@inp)
-
+          @dump.should_receive(:find_entry).with('assets.tar').and_throw(:assets)
           @dump.read_assets
         end
-      end
-    end
 
-    describe "clear_table" do
-      it "should call ActiveRecord::Base.connection.delete with sql for deleting everything from table" do
-        ActiveRecord::Base.connection.should_receive(:delete).with('DELETE FROM `first`', anything)
-        DumpReader.new('').send(:clear_table, '`first`')
-      end
-    end
+        [
+          %w(images videos),
+          {'images' => 0, 'videos' => 0},
+          {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
+        ].each do |assets|
+          it "should rewrite rewind method to empty method - to not raise exception, open tar and extract each entry" do
+            @dump.stub!(:config).and_return({:assets => assets})
+            Dir.stub!(:glob).and_return([])
+            FileUtils.stub!(:remove_entry_secure)
 
-    describe "quote_column_name" do
-      it "should return result of ActiveRecord::Base.connection.quote_column_name" do
-        ActiveRecord::Base.connection.should_receive(:quote_column_name).with('first').and_return('`first`')
-        DumpReader.new('').send(:quote_column_name, 'first').should == '`first`'
-      end
-    end
+            @assets_tar = mock('assets_tar')
+            @assets_tar.stub!(:rewind).and_raise('hehe - we want to rewind to center of gzip')
+            @dump.stub!(:find_entry).and_yield(@assets_tar)
 
-    describe "quote_value" do
-      it "should return result of ActiveRecord::Base.connection.quote_value" do
-        ActiveRecord::Base.connection.should_receive(:quote).with('first').and_return('`first`')
-        DumpReader.new('').send(:quote_value, 'first').should == '`first`'
-      end
-    end
+            @inp = mock('inp')
+            each_excpectation = @inp.should_receive(:each)
+            @entries = %w(a b c d).map do |s|
+              file = mock("file_#{s}")
+              each_excpectation.and_yield(file)
+              @inp.should_receive(:extract_entry).with(RAILS_ROOT, file)
+              file
+            end
+            Archive::Tar::Minitar.should_receive(:open).with(@assets_tar).and_yield(@inp)
 
-    describe "join_for_sql" do
-      it "should convert array ['`a`', '`b`'] to \"(`a`,`b`)\"" do
-        DumpReader.new('').send(:join_for_sql, %w(`a` `b`)).should == '(`a`,`b`)'
-      end
-    end
-
-    describe "insert_into_table" do
-      it "should call ActiveRecord::Base.connection.insert with sql for insert if values is string" do
-        ActiveRecord::Base.connection.should_receive(:insert).with("INSERT INTO `table` (`c1`,`c2`) VALUES (`v1`,`v2`)", anything)
-        DumpReader.new('').send(:insert_into_table, '`table`', '(`c1`,`c2`)', '(`v1`,`v2`)')
+            @dump.read_assets
+          end
+        end
       end
 
-      it "should call ActiveRecord::Base.connection.insert with sql for insert if values is array" do
-        ActiveRecord::Base.connection.should_receive(:insert).with("INSERT INTO `table` (`c1`,`c2`) VALUES (`v11`,`v12`),(`v21`,`v22`)", anything)
-        DumpReader.new('').send(:insert_into_table, '`table`', '(`c1`,`c2`)', ['(`v11`,`v12`)', '(`v21`,`v22`)'])
-      end
-    end
+      describe "new style" do
+        before do
+          @dump.should_receive(:find_entry).with('assets.tar')
+        end
 
-    describe "columns_insert_sql" do
-      it "should return columns sql part for insert" do
-        @dump = DumpReader.new('')
-        @dump.should_receive(:quote_column_name).with('a').and_return('`a`')
-        @dump.should_receive(:quote_column_name).with('b').and_return('`b`')
+        [
+          %w(images videos),
+          {'images' => 0, 'videos' => 0},
+          {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
+        ].each do |assets|
+          it "should extract each entry" do
+            @dump.stub!(:config).and_return({:assets => assets})
+            Dir.stub!(:glob).and_return([])
+            FileUtils.stub!(:remove_entry_secure)
 
-        @dump.send(:columns_insert_sql, %w(a b)).should == '(`a`,`b`)'
-      end
-    end
+            @dump.should_receive(:assets_root_link).and_yield('/tmp/abc', 'assets')
+            each_excpectation = @stream.should_receive(:each)
+            @entries = %w(a b c d).map do |s|
+              file = mock("file_#{s}", :full_name => "assets/#{s}")
+              each_excpectation.and_yield(file)
+              @stream.should_receive(:extract_entry).with('/tmp/abc', file)
+              file
+            end
+            other_file = mock('other_file', :full_name => 'other_file')
+            each_excpectation.and_yield(other_file)
+            @stream.should_not_receive(:extract_entry).with('/tmp/abc', other_file)
 
-    describe "values_insert_sql" do
-      it "should return values sql part for insert" do
-        @dump = DumpReader.new('')
-        @dump.should_receive(:quote_value).with('a').and_return('`a`')
-        @dump.should_receive(:quote_value).with('b').and_return('`b`')
-
-        @dump.send(:values_insert_sql, %w(a b)).should == '(`a`,`b`)'
+            @dump.read_assets
+          end
+        end
       end
     end
   end

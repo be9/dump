@@ -6,11 +6,14 @@ class DumpRake
 
     def self.restore(path)
       new(path).open do |dump|
-        dump.read_config
-        dump.read_schema
+        ActiveRecord::Base.logger.silence do
+          dump.read_config
+          dump.migrate_down
+          dump.read_schema
 
-        dump.read_tables
-        dump.read_assets
+          dump.read_tables
+          dump.read_assets
+        end
       end
     end
 
@@ -111,6 +114,39 @@ class DumpRake
       @config = Marshal.load(read_entry('config'))
     end
 
+    def migrate_down
+      if migrate_down?
+        find_entry("schema_migrations.dump") do |entry|
+          migrated = table_rows('schema_migrations').map{ |row| row['version'] }
+
+          dump_migrations = []
+          Marshal.load(entry) # skip header
+          dump_migrations << Marshal.load(entry).first until entry.eof?
+
+          migrate_down = (migrated - dump_migrations)
+
+          unless migrate_down.empty?
+            migrate_down.with_progress('Migrating down').reverse.each do |version|
+              DumpRake::Env.with_env('VERSION' => version) do
+                Rake::Task['db:migrate:down'].tap do |task|
+                  begin
+                    task.invoke
+                  rescue ActiveRecord::IrreversibleMigration
+                    STDERR.puts "Irreversible migration: #{version}"
+                  end
+                  task.reenable
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    def migrate_down?
+      !%w(0 n f).include?((DumpRake::Env[:migrate_down] || '').downcase.strip[0, 1])
+    end
+
     def read_schema
       read_entry_to_file('schema.rb') do |f|
         DumpRake::Env.with_env('SCHEMA' => f.path) do
@@ -169,57 +205,39 @@ class DumpRake
           assets_count, assets_paths = nil, assets
         end
 
-        DumpRake::Env.with_env('ASSETS' => assets_paths.join(':')) do
+        DumpRake::Env.with_env(:assets => assets_paths.join(':')) do
           Rake::Task['assets:delete'].invoke
         end
 
         Progress.start('Assets', assets_count || 1) do
-          find_entry('assets.tar') do |assets_tar|
-            def assets_tar.rewind
-              # rewind will fail - it must go to center of gzip
-              # also we don't need it - this is last step in dump restore
+          catch :assets do
+            # old style — in separate tar
+            find_entry('assets.tar') do |assets_tar|
+              def assets_tar.rewind
+                # rewind will fail - it must go to center of gzip
+                # also we don't need it - this is last step in dump restore
+              end
+              Archive::Tar::Minitar.open(assets_tar) do |inp|
+                inp.each do |entry|
+                  inp.extract_entry(RAILS_ROOT, entry)
+                  Progress.step if assets_count
+                end
+              end
+              throw :assets
             end
-            Archive::Tar::Minitar.open(assets_tar) do |inp|
-              inp.each do |entry|
-                inp.extract_entry(RAILS_ROOT, entry)
-                Progress.step if assets_count
+
+            # new style — in same tar
+            assets_root_link do |tmpdir, prefix|
+              stream.each do |entry|
+                if entry.full_name.starts_with?("#{prefix}/")
+                  stream.extract_entry(tmpdir, entry)
+                  Progress.step if assets_count
+                end
               end
             end
           end
-          Progress.step unless assets_count
         end
       end
-    end
-
-  protected
-
-    def clear_table(table_sql)
-      ActiveRecord::Base.connection.delete("DELETE FROM #{table_sql}", 'Clearing table')
-    end
-
-    def quote_column_name(column)
-      ActiveRecord::Base.connection.quote_column_name(column)
-    end
-
-    def quote_value(value)
-      ActiveRecord::Base.connection.quote(value)
-    end
-
-    def join_for_sql(quoted)
-      "(#{quoted.join(',')})"
-    end
-
-    def insert_into_table(table_sql, columns_sql, values_sql)
-      values_sql = values_sql.join(',') if values_sql.is_a?(Array)
-      ActiveRecord::Base.connection.insert("INSERT INTO #{table_sql} #{columns_sql} VALUES #{values_sql}", 'Loading dump')
-    end
-
-    def columns_insert_sql(columns)
-      join_for_sql(columns.map{ |column| quote_column_name(column) })
-    end
-
-    def values_insert_sql(values)
-      join_for_sql(values.map{ |column| quote_value(column) })
     end
   end
 end
