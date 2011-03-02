@@ -3,7 +3,7 @@ require File.dirname(__FILE__) + '/../../spec_helper'
 Dump = DumpRake::Dump
 describe Dump do
   def dump_path(file_name)
-    File.join(RAILS_ROOT, 'dump', file_name)
+    File.join(DumpRake::RailsRoot, 'dump', file_name)
   end
 
   def new_dump(file_name)
@@ -96,7 +96,7 @@ describe Dump do
   describe "versions" do
     describe "list" do
       def stub_glob
-        paths = %w(123 345 567).map do |name|
+        paths = %w[123 345 567].map do |name|
           path = dump_path("#{name}.tgz")
           File.should_receive(:file?).with(path).at_least(1).and_return(true)
           path
@@ -123,7 +123,7 @@ describe Dump do
     describe "with tags" do
       before do
         #             0        1  2    3      4      5        6    7    8      9  10   11   12     13 14 15   16
-        dumps_tags = [''] + %w(a  a,d  a,d,o  a,d,s  a,d,s,o  a,o  a,s  a,s,o  d  d,o  d,s  d,s,o  o  s  s,o  z)
+        dumps_tags = [''] + %w[a  a,d  a,d,o  a,d,s  a,d,s,o  a,o  a,s  a,s,o  d  d,o  d,s  d,s,o  o  s  s,o  z]
         paths = dumps_tags.enum_with_index.map do |dump_tags, i|
           path = dump_path("196504140659#{10 + i}@#{dump_tags}.tgz")
           File.should_receive(:file?).with(path).at_least(1).and_return(true)
@@ -170,7 +170,7 @@ describe Dump do
       [dump.time, dump.description, dump.tags, dump.ext]
     end
 
-    %w(tmp tgz).each do |ext|
+    %w[tmp tgz].each do |ext|
       it "should return empty results for dump with wrong name" do
         dump_name_parts("196504140659.#{ext}").should == [nil, '', [], nil]
         dump_name_parts("196504140659-lala.#{ext}").should == [nil, '', [], nil]
@@ -190,7 +190,7 @@ describe Dump do
 
   describe "path" do
     it "should return path" do
-      new_dump("19650414065945.tgz").path.should == Pathname(File.join(RAILS_ROOT, 'dump', "19650414065945.tgz"))
+      new_dump("19650414065945.tgz").path.should == Pathname(File.join(DumpRake::RailsRoot, 'dump', "19650414065945.tgz"))
     end
   end
 
@@ -257,11 +257,11 @@ describe Dump do
 
   describe "get_filter_tags" do
     it "should split string and return uniq non blank sorted tags" do
-      Dump.new('').send(:get_filter_tags, 'a,+b,+c,-d').should == {:simple => %w(a), :mandatory => %w(b c), :forbidden => %w(d)}
-      Dump.new('').send(:get_filter_tags, ' a , + b , + c , - d ').should == {:simple => %w(a), :mandatory => %w(b c), :forbidden => %w(d)}
-      Dump.new('').send(:get_filter_tags, ' a , + c , + b , - d ').should == {:simple => %w(a), :mandatory => %w(b c), :forbidden => %w(d)}
-      Dump.new('').send(:get_filter_tags, ' a , + b , + , - ').should == {:simple => %w(a), :mandatory => %w(b), :forbidden => []}
-      Dump.new('').send(:get_filter_tags, ' a , a , + b , + b , - d , - d ').should == {:simple => %w(a), :mandatory => %w(b), :forbidden => %w(d)}
+      Dump.new('').send(:get_filter_tags, 'a,+b,+c,-d').should == {:simple => %w[a], :mandatory => %w[b c], :forbidden => %w[d]}
+      Dump.new('').send(:get_filter_tags, ' a , + b , + c , - d ').should == {:simple => %w[a], :mandatory => %w[b c], :forbidden => %w[d]}
+      Dump.new('').send(:get_filter_tags, ' a , + c , + b , - d ').should == {:simple => %w[a], :mandatory => %w[b c], :forbidden => %w[d]}
+      Dump.new('').send(:get_filter_tags, ' a , + b , + , - ').should == {:simple => %w[a], :mandatory => %w[b], :forbidden => []}
+      Dump.new('').send(:get_filter_tags, ' a , a , + b , + b , - d , - d ').should == {:simple => %w[a], :mandatory => %w[b], :forbidden => %w[d]}
       proc{ Dump.new('').send(:get_filter_tags, 'a,+a') }.should_not raise_error
       proc{ Dump.new('').send(:get_filter_tags, 'a,-a') }.should raise_error
       proc{ Dump.new('').send(:get_filter_tags, '+a,-a') }.should raise_error
@@ -273,10 +273,10 @@ describe Dump do
   end
 
   describe "assets_root_link" do
-     it "should create tem dir, chdir there, symlink RAILS_ROOT to assets, yield and unlink assets ever if something raised" do
+    it "should create tem dir, chdir there, symlink rails app root to assets, yield and unlink assets ever if something raised" do
       Dir.should_receive(:mktmpdir).and_yield('/tmp/abc')
       Dir.should_receive(:chdir).with('/tmp/abc').and_yield
-      File.should_receive(:symlink).with(RAILS_ROOT, 'assets')
+      File.should_receive(:symlink).with(DumpRake::RailsRoot, 'assets')
       File.should_receive(:unlink).with('assets')
       proc{
         Dump.new('').send(:assets_root_link) do |dir, prefix|

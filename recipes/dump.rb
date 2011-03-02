@@ -1,11 +1,21 @@
-$: << File.join(File.dirname(__FILE__), '..', 'lib')
-require 'dump_rake/env'
+$: << File.join(File.dirname(__FILE__), '../lib')
 require 'shell_escape'
 require 'continious_timeout'
+require 'fileutils'
+
+require 'dump_rake/env'
+
 begin
-  require 'active_support'
-rescue LoadError
-  require 'activesupport'
+  nil.blank?
+rescue
+  Object.class_eval do
+    def blank?
+      respond_to?(:empty?) ? empty? : !self
+    end
+    def present?
+      !blank?
+    end
+  end
 end
 
 namespace :dump do
@@ -17,7 +27,7 @@ namespace :dump do
 
     env.update(DumpRake::Env.for_command(command, true))
 
-    cmd = %W(#{rake} -s dump:#{command})
+    cmd = %W[#{rake} -s dump:#{command}]
     cmd += env.sort.map{ |key, value| "#{key}=#{value}" }
     ShellEscape.command(*cmd)
   end
@@ -44,7 +54,7 @@ namespace :dump do
             full_host = "#{"#{user}@" if user.present?}#{host}"
 
             ssh = port.present? ? "ssh -p #{port}" : 'ssh'
-            cmd = %W(rsync -P -e #{ssh} --timeout=15)
+            cmd = %W[rsync -P -e #{ssh} --timeout=15]
             case direction
             when :up
               cmd << from << "#{full_host}:#{to}"
@@ -152,7 +162,7 @@ namespace :dump do
   end
 
   def auto_backup?
-    !%w(0 n f).include?((DumpRake::Env[:backup] || '').downcase.strip[0, 1])
+    !DumpRake::Env.no?(:backup)
   end
 
   namespace :local do
@@ -239,7 +249,6 @@ namespace :dump do
         last_part_of_last_line(run_remote("cd #{current_path}; #{dump_command(:versions, :rake => fetch_rake, :RAILS_ENV => fetch_rails_env, :PROGRESS_TTY => '+')}"))
       end
       if file
-        require 'fileutils'
         FileUtils.mkpath('dump')
 <<<<<<< HEAD
         file.strip!
@@ -249,6 +258,16 @@ namespace :dump do
 >>>>>>> toy/master
       end
     end
+  end
+
+  desc "Shorthand for dump:local:upload" << DumpRake::Env.explain_variables_for_command(:transfer)
+  task :upload, :roles => :db, :only => {:primary => true} do
+    local.upload
+  end
+
+  desc "Shorthand for dump:remote:download" << DumpRake::Env.explain_variables_for_command(:transfer)
+  task :download, :roles => :db, :only => {:primary => true} do
+    remote:download
   end
 
   namespace :mirror do
@@ -293,14 +312,34 @@ namespace :dump do
     end
   end
 
-  desc "Creates remote dump and downloads to local (desc defaults to 'backup')" << DumpRake::Env.explain_variables_for_command(:backup)
-  task :backup, :roles => :db, :only => {:primary => true} do
-    file = with_additional_tags('backup') do
-      remote.create
+  namespace :backup do
+    desc "Shorthand for dump:backup:create" << DumpRake::Env.explain_variables_for_command(:backup)
+    task :default, :roles => :db, :only => {:primary => true} do
+      create
     end
-    if file.present?
-      DumpRake::Env.with_clean_env(:like => file) do
-        remote.download
+
+    desc "Creates remote dump and downloads to local (desc defaults to 'backup')" << DumpRake::Env.explain_variables_for_command(:backup)
+    task :create, :roles => :db, :only => {:primary => true} do
+      file = with_additional_tags('backup') do
+        remote.create
+      end
+      if file.present?
+        DumpRake::Env.with_clean_env(:like => file) do
+          remote.download
+        end
+      end
+    end
+
+    desc "Uploads dump with backup tag and restores it on remote" << DumpRake::Env.explain_variables_for_command(:backup_restore)
+    task :restore, :roles => :db, :only => {:primary => true} do
+      file = with_additional_tags('backup') do
+        last_part_of_last_line(run_local(dump_command(:versions)))
+      end
+      if file.present?
+        DumpRake::Env.with_clean_env(:like => file) do
+          local.upload
+          remote.restore
+        end
       end
     end
   end

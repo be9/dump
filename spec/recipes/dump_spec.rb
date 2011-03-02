@@ -10,7 +10,7 @@ describe "cap dump" do
   end
 
   def all_dictionary_variables
-    DumpRake::Env.dictionary.each_with_object({}) do |(key, value), filled_env|
+    DumpRake::Env::DICTIONARY.each_with_object({}) do |(key, value), filled_env|
       filled_env[key] = value.join(' ')
     end
   end
@@ -18,7 +18,7 @@ describe "cap dump" do
   def self.test_passing_environment_variables(place, command, command_strings, options = {})
     DumpRake::Env.variable_names_for_command(command).each do |variable|
       command_string = command_strings[variable]
-      DumpRake::Env.dictionary[variable].each do |name|
+      DumpRake::Env::DICTIONARY[variable].each do |name|
         it "should pass #{variable} if it is set through environment variable #{name}" do
           violated "command_string not specified" unless command_string
           full_command_string = command_string
@@ -159,8 +159,8 @@ describe "cap dump" do
       test_passing_environment_variables(:local, :create, {
         :desc => "rake -s dump:create 'DESC=some data' TAGS=local",
         :tags => "rake -s dump:create 'TAGS=local,some data'",
-        :assets => "rake -s dump:create 'ASSETS=some data' TAGS=local",
         :tables => "rake -s dump:create 'TABLES=some data' TAGS=local",
+        :assets => "rake -s dump:create 'ASSETS=some data' TAGS=local",
       }, :return_value => '123.tgz')
 
       it "should print result of rake task" do
@@ -188,6 +188,9 @@ describe "cap dump" do
         :like => "rake -s dump:restore 'LIKE=some data'",
         :tags => "rake -s dump:restore 'TAGS=some data'",
         :migrate_down => "rake -s dump:restore 'MIGRATE_DOWN=some data'",
+        :restore_schema => "rake -s dump:restore 'RESTORE_SCHEMA=some data'",
+        :restore_tables => "rake -s dump:restore 'RESTORE_TABLES=some data'",
+        :restore_assets => "rake -s dump:restore 'RESTORE_ASSETS=some data'",
       })
     end
 
@@ -197,10 +200,11 @@ describe "cap dump" do
         @cap.find_and_execute_task("dump:local:upload")
       end
 
-      test_passing_environment_variables(:local, :versions, {
+      test_passing_environment_variables(:local, :transfer, {
         :like => "rake -s dump:versions 'LIKE=some data'",
         :tags => "rake -s dump:versions 'TAGS=some data'",
         :summary => "rake -s dump:versions", # block sending summary to versions
+        :transfer_via => "rake -s dump:versions", # tranfer_via is used internally
       }, :cap_task => 'dump:local:upload')
 
       it "should not upload anything if there are no versions avaliable" do
@@ -354,6 +358,9 @@ describe "cap dump" do
         :like => "rake -s dump:restore 'LIKE=some data' PROGRESS_TTY=+ RAILS_ENV=production",
         :tags => "rake -s dump:restore PROGRESS_TTY=+ RAILS_ENV=production 'TAGS=some data'",
         :migrate_down => "rake -s dump:restore 'MIGRATE_DOWN=some data' PROGRESS_TTY=+ RAILS_ENV=production",
+        :restore_schema => "rake -s dump:restore PROGRESS_TTY=+ RAILS_ENV=production 'RESTORE_SCHEMA=some data'",
+        :restore_tables => "rake -s dump:restore PROGRESS_TTY=+ RAILS_ENV=production 'RESTORE_TABLES=some data'",
+        :restore_assets => "rake -s dump:restore PROGRESS_TTY=+ RAILS_ENV=production 'RESTORE_ASSETS=some data'",
       })
 
       it "should use custom rake binary" do
@@ -371,17 +378,18 @@ describe "cap dump" do
 
       it "should block sending summary to versions" do
         @cap.dump.should_receive(:run_remote).with("cd #{@remote_path}; rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production").and_return('')
-        DumpRake::Env.dictionary[:summary].each do |name|
+        DumpRake::Env::DICTIONARY[:summary].each do |name|
           DumpRake::Env.with_env name => 'true' do
             @cap.find_and_execute_task("dump:remote:download")
           end
         end
       end
 
-      test_passing_environment_variables(:remote, :download, {
+      test_passing_environment_variables(:remote, :transfer, {
         :like => "rake -s dump:versions 'LIKE=some data' PROGRESS_TTY=+ RAILS_ENV=production",
         :tags => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production 'TAGS=some data'",
         :summary => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production", # block sending summary to versions
+        :transfer_via => "rake -s dump:versions PROGRESS_TTY=+ RAILS_ENV=production", # tranfer_via is used internally
       }, :cap_task => "dump:remote:download")
 
       it "should not download anything if there are no versions avaliable" do

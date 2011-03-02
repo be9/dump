@@ -3,7 +3,7 @@ class DumpRake
   protected
 
     def schema_tables
-      %w(schema_info schema_migrations)
+      %w[schema_info schema_migrations]
     end
 
     def verify_connection
@@ -46,19 +46,17 @@ class DumpRake
     end
 
 
+    def avaliable_tables
+      ActiveRecord::Base.connection.tables
+    end
+
     def tables_to_dump
-      avaliable_tables = ActiveRecord::Base.connection.tables
       if DumpRake::Env[:tables]
-        env_tables = DumpRake::Env[:tables].dup
-        prefix = env_tables.slice!(/^\-/)
-        candidates = env_tables.split(',').map(&:strip).map(&:downcase).uniq.reject(&:blank?)
-        if prefix
-          avaliable_tables - (candidates - schema_tables)
-        else
-          avaliable_tables & (candidates | schema_tables)
+        avaliable_tables.select do |table|
+          schema_tables.include?(table) || DumpRake::Env.filter(:tables).pass?(table)
         end
       else
-        avaliable_tables - %w(sessions)
+        avaliable_tables - %w[sessions]
       end
     end
 

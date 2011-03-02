@@ -1,7 +1,8 @@
 require File.dirname(__FILE__) + '/../../spec_helper'
 
 require File.dirname(__FILE__) + '/../../../lib/dump_rake'
-require File.dirname(__FILE__) + '/../../../lib/dump_rake/dump_reader'
+
+require 'active_record/migration'
 
 def object_of_length(required_length)
   LengthConstraint.new(required_length)
@@ -48,7 +49,7 @@ describe DumpReader do
       it "should format text" do
         @summary = Summary.new
         @summary.header 'One'
-        @summary.data(%w(fff ggg jjj ppp qqq www))
+        @summary.data(%w[fff ggg jjj ppp qqq www])
         @summary.header 'Two'
         @summary.data([['fff', 234], ['ggg', 321], ['jjj', 666], ['ppp', 678], ['qqq', 123], ['www', 345]].map{ |entry| entry.join(': ') })
 
@@ -88,7 +89,7 @@ describe DumpReader do
     {
       {'path/a' => {:total => 20, :files => 10}, 'path/b' => {:total => 20, :files => 10}} => ['path/a: 10 files (20 entries total)', 'path/b: 10 files (20 entries total)'],
       {'path/a' => 10, 'path/b' => 20} => ['path/a: 10 entries', 'path/b: 20 entries'],
-      %w(path/a path/b) => %w(path/a path/b),
+      %w[path/a path/b] => %w[path/a path/b],
     }.each do |assets, formatted_assets|
       it "should call dump subroutines and create summary" do
         tables = {'a' => 10, 'b' => 20, 'c' => 666}
@@ -114,7 +115,7 @@ describe DumpReader do
     it "should call dump subroutines and create summary with schema" do
       tables = {'a' => 10, 'b' => 20, 'c' => 666}
       formatted_tables = ['a: 10 rows', 'b: 20 rows', 'c: 666 rows']
-      assets = formatted_assets = %w(path/a path/b)
+      assets = formatted_assets = %w[path/a path/b]
 
       schema = mock('schema')
       schema_lines = mock('schema_lines')
@@ -231,11 +232,96 @@ describe DumpReader do
 
     describe "read_config" do
       it "should read config" do
-        @data = {:tables => {:first => 1}, :assets => %w(images videos)}
+        @data = {:tables => {:first => 1}, :assets => %w[images videos]}
         @dump.should_receive(:read_entry).with('config').and_return(Marshal.dump(@data))
 
         @dump.read_config
         @dump.config.should == @data
+      end
+    end
+
+    describe "migrate_down" do
+      it "should not invoke rake tasks or find_entry if migrate_down is 0, no or false" do
+        Rake::Task.should_not_receive(:[])
+        @dump.should_not_receive(:find_entry)
+
+        DumpRake::Env.with_env(:migrate_down => '0') do
+          @dump.migrate_down
+        end
+        DumpRake::Env.with_env(:migrate_down => 'no') do
+          @dump.migrate_down
+        end
+        DumpRake::Env.with_env(:migrate_down => 'false') do
+          @dump.migrate_down
+        end
+      end
+
+      it "should invoke db:drop and db:create if migrate_down is reset" do
+        @load_task = mock('drop_task')
+        @dump_task = mock('create_task')
+        Rake::Task.should_receive(:[]).with('db:drop').and_return(@load_task)
+        Rake::Task.should_receive(:[]).with('db:create').and_return(@dump_task)
+        @load_task.should_receive(:invoke)
+        @dump_task.should_receive(:invoke)
+
+        DumpRake::Env.with_env(:migrate_down => 'reset') do
+          @dump.migrate_down
+        end
+      end
+
+      [nil, '1'].each do |migrate_down_value|
+        describe "when migrate_down is #{migrate_down_value.inspect}" do
+          it "should not find_entry if table schema_migrations is not present" do
+            @dump.stub!(:avaliable_tables).and_return(%w[first])
+            @dump.should_not_receive(:find_entry)
+
+            DumpRake::Env.with_env(:migrate_down => migrate_down_value) do
+              @dump.migrate_down
+            end
+          end
+
+          it "should find schema_migrations.dump if table schema_migrations is present" do
+            @dump.stub!(:avaliable_tables).and_return(%w[schema_migrations first])
+            @dump.should_receive(:find_entry).with('schema_migrations.dump')
+
+            DumpRake::Env.with_env(:migrate_down => migrate_down_value) do
+              @dump.migrate_down
+            end
+          end
+
+          it "should call migrate down for each version not present in schema_migrations table" do
+            @entry = StringIO.new
+            Marshal.dump(['version'], @entry)
+            %w[1 2 3 4].each do |i|
+              Marshal.dump(i, @entry)
+            end
+            @entry.rewind
+
+            @dump.stub!(:avaliable_tables).and_return(%w[schema_migrations first])
+            @dump.should_receive(:find_entry).with('schema_migrations.dump').and_yield(@entry)
+            @dump.should_receive('table_rows').with('schema_migrations').and_return(%w[1 2 4 5 6 7].map{ |version| {'version' => version} })
+
+            @versions = []
+            @migrate_down_task = mock('migrate_down_task')
+            @migrate_down_task.should_receive('invoke').exactly(2).times.with do
+              version = DumpRake::Env['VERSION']
+              @versions << version
+              if version == '6'
+                raise ActiveRecord::IrreversibleMigration
+              end
+            end
+            @migrate_down_task.should_receive('reenable').exactly(3).times
+
+            $stderr.should_receive('puts').with("Irreversible migration: 6")
+
+            Rake::Task.should_receive(:[]).with('db:migrate:down').exactly(3).times.and_return(@migrate_down_task)
+
+            DumpRake::Env.with_env(:migrate_down => migrate_down_value) do
+              @dump.migrate_down
+            end
+            @versions.should == %w[5 6 7].reverse
+          end
+        end
       end
     end
 
@@ -307,18 +393,11 @@ describe DumpReader do
         @dump.read_table('first', 10)
       end
 
-      it "should read table if entry found for table" do
+      it "should clear table and read table if entry found for table" do
         @entry = mock('entry', :to_str => Marshal.dump('data'), :eof? => true)
         @dump.should_receive(:find_entry).with('first.dump').and_yield(@entry)
-        @dump.should_receive(:quote_table_name).with('first')
-        @dump.read_table('first', 10)
-      end
-
-      it "should not call clear_table for basic tables" do
-        @entry = mock('entry', :to_str => Marshal.dump('data'), :eof? => true)
-        @dump.should_receive(:find_entry).with('first.dump').and_yield(@entry)
-        @dump.should_receive(:quote_table_name).with('first')
-        @dump.should_not_receive(:clear_table)
+        @dump.should_receive(:quote_table_name).with('first').and_return('`first`')
+        @dump.should_receive(:clear_table).with('`first`')
         @dump.read_table('first', 10)
       end
 
@@ -334,7 +413,7 @@ describe DumpReader do
         def create_entry(rows_count)
           @entry = StringIO.new
 
-          @columns = %w(id name)
+          @columns = %w[id name]
           @rows = []
           Marshal.dump(@columns, @entry)
           (1..rows_count).each do |i|
@@ -348,6 +427,7 @@ describe DumpReader do
         end
         it "should read to eof" do
           create_entry(2500)
+          @dump.stub!(:clear_table)
           @dump.stub!(:insert_into_table)
           @dump.read_table('first', 2500)
           @entry.eof?.should be_true
@@ -355,6 +435,7 @@ describe DumpReader do
 
         it "should try to insert rows in slices of 1000 rows" do
           create_entry(2500)
+          @dump.stub!(:clear_table)
           @dump.should_receive(:insert_into_table).with(anything, anything, object_of_length(1000)).twice
           @dump.should_receive(:insert_into_table).with(anything, anything, object_of_length(500)).once
 
@@ -363,6 +444,7 @@ describe DumpReader do
 
         it "should try to insert row by row if slice method fails" do
           create_entry(2500)
+          @dump.stub!(:clear_table)
           @dump.should_receive(:insert_into_table).with(anything, anything, kind_of(Array)).exactly(3).times.and_raise('sql error')
           @dump.should_receive(:insert_into_table).with(anything, anything, kind_of(String)).exactly(2500).times
           @dump.read_table('first', 2500)
@@ -370,6 +452,7 @@ describe DumpReader do
 
         it "should quote table, columns and values and send them to insert_into_table" do
           create_entry(100)
+          @dump.stub!(:clear_table)
           @dump.should_receive(:quote_table_name).with('first').and_return('`first`')
           @dump.should_receive(:columns_insert_sql).with(@columns).and_return('(`id`, `name`)')
           @rows.each do |row|
@@ -408,7 +491,7 @@ describe DumpReader do
         end
 
         it "should call assets:delete" do
-          @assets = %w(images videos)
+          @assets = %w[images videos]
           @dump.stub!(:config).and_return({:assets => @assets})
           @dump.stub!(:find_entry)
 
@@ -418,7 +501,7 @@ describe DumpReader do
         end
 
         it "should call assets:delete with ASSETS set to config[:assets] joined with :" do
-          @assets = %w(images videos)
+          @assets = %w[images videos]
           @dump.stub!(:config).and_return({:assets => @assets})
           @dump.stub!(:find_entry)
 
@@ -428,28 +511,56 @@ describe DumpReader do
 
           @dump.read_assets
         end
+
+        describe "when called with restore_assets" do
+          it "should delete files and dirs only in requested paths" do
+            @assets = %w[images videos]
+            @dump.stub!(:config).and_return({:assets => @assets})
+
+            DumpRake::Assets.should_receive('glob_asset_children').with('images', '**/*').and_return(%w[images images/a.jpg images/b.jpg])
+            DumpRake::Assets.should_receive('glob_asset_children').with('videos', '**/*').and_return(%w[videos videos/a.mov])
+
+            @dump.should_receive('read_asset?').with('images/b.jpg', DumpRake::RailsRoot).ordered.and_return(false)
+            @dump.should_receive('read_asset?').with('images/a.jpg', DumpRake::RailsRoot).ordered.and_return(true)
+            @dump.should_receive('read_asset?').with('images', DumpRake::RailsRoot).ordered.and_return(true)
+            @dump.should_receive('read_asset?').with('videos/a.mov', DumpRake::RailsRoot).ordered.and_return(false)
+            @dump.should_receive('read_asset?').with('videos', DumpRake::RailsRoot).ordered.and_return(false)
+
+            File.should_receive('file?').with('images/a.jpg').and_return(true)
+            File.should_receive('unlink').with('images/a.jpg')
+            File.should_not_receive('file?').with('images/b.jpg')
+            File.should_receive('file?').with('images').and_return(false)
+            File.should_receive('directory?').with('images').and_return(true)
+            Dir.should_receive('unlink').with('images').and_raise(Errno::ENOTEMPTY)
+
+            DumpRake::Env.with_env(:restore_assets => 'images/a.*:stylesheets') do
+              @dump.read_assets
+            end
+          end
+        end
       end
 
       describe "old style" do
         it "should find assets.tar" do
-          @assets = %w(images videos)
+          @assets = %w[images videos]
           @dump.stub!(:config).and_return({:assets => @assets})
           Dir.stub!(:glob).and_return([])
-          FileUtils.stub!(:remove_entry_secure)
+          FileUtils.stub!(:remove_entry)
+          @stream.stub!(:each)
 
-          @dump.should_receive(:find_entry).with('assets.tar').and_throw(:assets)
+          @dump.should_receive(:find_entry).with('assets.tar')
           @dump.read_assets
         end
 
         [
-          %w(images videos),
+          %w[images videos],
           {'images' => 0, 'videos' => 0},
           {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
         ].each do |assets|
           it "should rewrite rewind method to empty method - to not raise exception, open tar and extract each entry" do
             @dump.stub!(:config).and_return({:assets => assets})
             Dir.stub!(:glob).and_return([])
-            FileUtils.stub!(:remove_entry_secure)
+            FileUtils.stub!(:remove_entry)
 
             @assets_tar = mock('assets_tar')
             @assets_tar.stub!(:rewind).and_raise('hehe - we want to rewind to center of gzip')
@@ -457,10 +568,10 @@ describe DumpReader do
 
             @inp = mock('inp')
             each_excpectation = @inp.should_receive(:each)
-            @entries = %w(a b c d).map do |s|
+            @entries = %w[a b c d].map do |s|
               file = mock("file_#{s}")
               each_excpectation.and_yield(file)
-              @inp.should_receive(:extract_entry).with(RAILS_ROOT, file)
+              @inp.should_receive(:extract_entry).with(DumpRake::RailsRoot, file)
               file
             end
             Archive::Tar::Minitar.should_receive(:open).with(@assets_tar).and_yield(@inp)
@@ -476,18 +587,18 @@ describe DumpReader do
         end
 
         [
-          %w(images videos),
+          %w[images videos],
           {'images' => 0, 'videos' => 0},
           {'images' => {:files => 0, :total => 0}, 'videos' => {:files => 0, :total => 0}},
         ].each do |assets|
           it "should extract each entry" do
             @dump.stub!(:config).and_return({:assets => assets})
             Dir.stub!(:glob).and_return([])
-            FileUtils.stub!(:remove_entry_secure)
+            FileUtils.stub!(:remove_entry)
 
             @dump.should_receive(:assets_root_link).and_yield('/tmp/abc', 'assets')
             each_excpectation = @stream.should_receive(:each)
-            @entries = %w(a b c d).map do |s|
+            @entries = %w[a b c d].map do |s|
               file = mock("file_#{s}", :full_name => "assets/#{s}")
               each_excpectation.and_yield(file)
               @stream.should_receive(:extract_entry).with('/tmp/abc', file)
@@ -499,6 +610,25 @@ describe DumpReader do
 
             @dump.read_assets
           end
+        end
+      end
+    end
+
+    describe "read_asset?" do
+      it "should create filter and call custom_pass? on it" do
+        @filter = mock('filter')
+        @filter.stub!('custom_pass?')
+
+        DumpRake::Env.should_receive('filter').with(:restore_assets, DumpRake::Assets::SPLITTER).and_return(@filter)
+
+        @dump.read_asset?('a', 'b')
+      end
+
+      it "should test path usint fnmatch" do
+        DumpRake::Env.with_env(:restore_assets => '[a-b]') do
+          @dump.read_asset?('x/a', 'x').should be_true
+          @dump.read_asset?('x/b/file', 'x').should be_true
+          @dump.read_asset?('x/c', 'x').should be_false
         end
       end
     end

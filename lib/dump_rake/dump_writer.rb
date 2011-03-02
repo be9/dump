@@ -83,10 +83,10 @@ class DumpRake
       assets = assets_to_dump
       if assets.present?
         config[:assets] = {}
-        Dir.chdir(RAILS_ROOT) do
+        Dir.chdir(DumpRake::RailsRoot) do
           assets = Dir[*assets].uniq
           assets.with_progress('Assets').each do |asset|
-            paths = Dir[File.join(asset, '**', '*')]
+            paths = Dir[File.join(asset, '**/*')]
             files = paths.select{ |path| File.file?(path) }
             config[:assets][asset] = {:total => paths.length, :files => files.length}
             assets_root_link do |tmpdir, prefix|
@@ -112,7 +112,7 @@ class DumpRake
     def assets_to_dump
       begin
         Rake::Task['assets'].invoke
-        DumpRake::Env[:assets].split(/[:,]/)
+        DumpRake::Env[:assets].split(DumpRake::Assets::SPLITTER)
       rescue
         []
       end

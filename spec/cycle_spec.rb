@@ -1,5 +1,7 @@
 require File.dirname(__FILE__) + '/spec_helper'
 
+require File.dirname(__FILE__) + '/../lib/dump_rake'
+
 def database_configs
   YAML::load(IO.read(PLUGIN_SPEC_DIR + "/db/database.yml"))
 end
@@ -20,14 +22,15 @@ def load_schema
 end
 
 def in_temp_rails_app
-  old_rails_root = RAILS_ROOT.dup
-  RAILS_ROOT.replace(File.join(PLUGIN_SPEC_DIR, 'temp_rails_app'))
-  FileUtils.remove_entry_secure(RAILS_ROOT) if File.exist?(RAILS_ROOT)
-  FileUtils.mkpath(RAILS_ROOT)
+  old_rails_root = DumpRake::RailsRoot.dup
+  DumpRake::RailsRoot.replace(File.join(PLUGIN_SPEC_DIR, 'temp_rails_app'))
+  FileUtils.remove_entry(DumpRake::RailsRoot) if File.exist?(DumpRake::RailsRoot)
+  FileUtils.mkpath(DumpRake::RailsRoot)
+  Progress.stub!(:io).and_return(StringIO.new)
   yield
 ensure
-  FileUtils.remove_entry_secure(RAILS_ROOT) if File.exist?(RAILS_ROOT)
-  RAILS_ROOT.replace(old_rails_root)
+  FileUtils.remove_entry(DumpRake::RailsRoot) if File.exist?(DumpRake::RailsRoot)
+  DumpRake::RailsRoot.replace(old_rails_root)
 end
 
 def create_chickens!(options = {})
@@ -65,8 +68,8 @@ end
 def reset_rake!
   @rake = Rake::Application.new
   Rake.application = @rake
-  load File.dirname(__FILE__) + '/../tasks/assets.rake'
-  load File.dirname(__FILE__) + '/../tasks/dump.rake'
+  load File.dirname(__FILE__) + '/../lib/tasks/assets.rake'
+  load File.dirname(__FILE__) + '/../lib/tasks/dump.rake'
   Rake::Task.define_task('environment')
   Rake::Task.define_task('db:schema:dump') do
     File.open(DUMMY_SCHEMA_PATH, 'r') do |r|
@@ -157,26 +160,28 @@ describe 'full cycle' do
 
     it "should create same dump for all adapters" do
       in_temp_rails_app do
+        dumps = []
         adapters.each do |adapter|
           use_adapter(adapter)
           load_schema
-          call_rake_create(:description => adapter)
-        end
 
-        dumps = {}
-        Dump.list.each do |dump|
-          dumps[dump.name] = {
-            :path => dump.path,
-            :hash => Digest::SHA1.hexdigest(File.read(dump.path)),
-          }
-        end
+          dump_name = call_rake_create(:desc => adapter)[:stdout].strip
+          dump_path = File.join(DumpRake::RailsRoot, 'dump', dump_name)
 
-        dumps.keys.each do |dump_a|
-          dumps.keys.each do |dump_b|
-            next unless dump_a < dump_b
-            dumps[dump_a][:path].should_not == dumps[dump_b][:path]
-            dumps[dump_a][:hash].should == dumps[dump_b][:hash]
+          data = []
+          Zlib::GzipReader.open(dump_path) do |gzip|
+            Archive::Tar::Minitar.open(gzip, 'r') do |stream|
+              stream.each do |entry|
+                data << [entry.full_name, entry.read]
+              end
+            end
           end
+          dumps << {:path => dump_path, :data => data.sort}
+        end
+
+        dumps.combination(2) do |dump_a, dump_b|
+          dump_a[:path].should_not == dump_b[:path]
+          dump_a[:data].should == dump_b[:data]
         end
       end
     end
