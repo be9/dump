@@ -197,18 +197,11 @@ namespace :dump do
 
     desc "Upload dump" << DumpRake::Env.explain_variables_for_command(:transfer)
     task :upload, :roles => :db, :only => {:primary => true} do
-<<<<<<< HEAD
-      files = run_local(dump_command(:versions)).split("\n")
-      if file = files.last
-        file.strip!
-        transfer_with_progress :up, "dump/#{file}", "#{current_path}/dump/#{file}", :via => :scp
-=======
       file = DumpRake::Env.with_env(:summary => nil) do
         last_part_of_last_line(run_local(dump_command(:versions)))
       end
       if file
         do_transfer :up, "dump/#{file}", "#{current_path}/dump/#{file}"
->>>>>>> toy/master
       end
     end
   end
@@ -250,12 +243,7 @@ namespace :dump do
       end
       if file
         FileUtils.mkpath('dump')
-<<<<<<< HEAD
-        file.strip!
-        transfer_with_progress :down, "#{current_path}/dump/#{file}", "dump/#{file}", :via => :scp
-=======
         do_transfer :down, "#{current_path}/dump/#{file}", "dump/#{file}"
->>>>>>> toy/master
       end
     end
   end
